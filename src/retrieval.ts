@@ -247,7 +247,10 @@ function dedupeWorkspace(files: WorkspaceFile[]): WorkspaceFile[] {
 }
 
 function normalizeWorkspacePath(path: string): string {
-  return path.replace(/^\/+/, "").replace(/\/+/g, "/");
+  return path
+    .replace(/^\/+/, "")
+    .replace(/^workspace\/?/, "")
+    .replace(/\/+/g, "/");
 }
 
 function flatPath(value: string): string {

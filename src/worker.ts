@@ -219,7 +219,7 @@ function parseShell(command: string): string[] {
 function normalizeShellPath(value: string): string {
   return value
     .replace(/^\.?\//, "")
-    .replace(/^workspace\//, "/workspace/")
+    .replace(/^workspace\/?/, "")
     .replace(/\/+/g, "/");
 }
 
