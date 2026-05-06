@@ -1,0 +1,12 @@
+name = "openclaw-docs-chat-proxy"
+main = "src/worker.ts"
+account_id = "91b59577e757131d68d55a471fe32aca"
+compatibility_date = "2026-05-06"
+routes = [{ pattern = "docs-chat.openclaw.ai/*", zone_name = "openclaw.ai" }]
+
+[vars]
+DOCS_CORPUS_URL = "https://documentation.openclaw.ai/llms-full.txt"
+SOURCE_INDEX_URL = "https://documentation.openclaw.ai/source-index.jsonl"
+GITHUB_INDEX_URL = "https://documentation.openclaw.ai/ask-molty/github-search.jsonl"
+WORKSPACE_MANIFEST_URL = "https://documentation.openclaw.ai/ask-molty/workspace-manifest.json"
+OPENAI_MODEL = "chat-latest"
