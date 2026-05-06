@@ -132,13 +132,24 @@ function recordsFromJsonl(text: string, kind: SearchRecord["kind"]): SearchRecor
 function selectRecords(records: SearchRecord[], query: string, limit: number): SearchRecord[] {
   const terms = tokenize(query);
   return records
-    .map((record) => ({
-      record,
-      score: scoreText(
-        `${record.title ?? ""}\n${record.path}\n${record.url ?? ""}\n${record.search}`,
-        terms,
-      ),
-    }))
+    .map((record) => {
+      const pathText = `${record.title ?? ""}\n${record.path}\n${record.url ?? ""}`.toLowerCase();
+      const searchText = record.search.toLowerCase();
+      const exactBonus = terms.reduce((score, term) => {
+        if (pathText.includes(term)) return score + 100 + term.length;
+        if (term.includes("-") && searchText.includes(term)) return score + 40 + term.length;
+        return score;
+      }, 0);
+      return {
+        record,
+        score:
+          exactBonus +
+          scoreText(
+            `${record.title ?? ""}\n${record.path}\n${record.url ?? ""}\n${record.search}`,
+            terms,
+          ),
+      };
+    })
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
