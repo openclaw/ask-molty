@@ -66,6 +66,12 @@ The generated workspace can be large because GitHub threads are sharded into mar
 
 The Worker expects `OPENAI_API_KEY` as a Cloudflare Worker secret. The default model is `chat-latest`, which OpenAI maps to GPT-5.5 Instant in the API.
 
+Docs chat auth is brokered through ClawHub:
+
+- `CLAWHUB_AUTH_URL` sends users to `https://hub.openclaw.ai/docs/auth`.
+- `CLAWHUB_SESSION_VERIFY_URL` verifies the ClawHub Convex Auth token once.
+- `ASK_MOLTY_AUTH_SECRET` is optional; when set, it signs the docs-only session cookie.
+
 ```bash
 npm run deploy
 ```

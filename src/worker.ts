@@ -11,6 +11,8 @@ import type {
 const allowedOrigins = new Set([
   "https://documentation.openclaw.ai",
   "http://documentation.openclaw.ai",
+  "https://docs.openclaw.ai",
+  "http://docs.openclaw.ai",
   "https://openclaw.github.io",
   "http://localhost:4173",
   "http://127.0.0.1:4173",
@@ -18,6 +20,8 @@ const allowedOrigins = new Set([
 const maxMessageLength = 2000;
 const maxToolRounds = 4;
 const maxShellOutput = 16_000;
+const authCookieName = "ask_molty_session";
+const authCookieMaxAgeSeconds = 60 * 60 * 24 * 7;
 const artifactUrls: Record<string, string> = {
   "/ask-molty/github-search.jsonl":
     "https://github.com/openclaw/ask-molty/releases/download/workspace-latest/github-search.jsonl",
@@ -29,14 +33,19 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders(request) });
     const pathname = new URL(request.url).pathname;
     if (pathname in artifactUrls) return serveArtifact(request, artifactUrls[pathname] ?? "");
+    if (pathname === "/ask-molty/auth/callback" && request.method === "POST")
+      return authCallback(request, env);
     if (isChatPath(pathname) && ["GET", "HEAD"].includes(request.method))
-      return sessionResponse(request);
+      return sessionResponse(request, env);
     if (pathname === "/ask-molty/api/session" && ["GET", "HEAD"].includes(request.method))
-      return sessionResponse(request);
-    if (pathname === "/ask-molty/sign-in" && request.method === "GET") return signInPage(request);
+      return sessionResponse(request, env);
+    if (pathname === "/ask-molty/sign-in" && request.method === "GET")
+      return signInPage(request, env);
     if (!isChatPath(pathname) || request.method !== "POST")
       return new Response("Not found", { status: 404 });
     if (!isAllowedChatOrigin(request)) return json(request, { error: "origin not allowed" }, 403);
+    if (!(await hasValidSession(request, env)))
+      return json(request, { authenticated: false, error: "GitHub verification required" }, 401);
     if (!env.OPENAI_API_KEY) return json(request, { error: "OPENAI_API_KEY missing" }, 500);
 
     let message = "";
@@ -521,21 +530,219 @@ function json(request: Request, data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers });
 }
 
-function sessionResponse(request: Request): Response {
+type VerifiedClawHubSession =
+  | {
+      ok: true;
+      provider: "github";
+      user: { id: string; handle: string | null };
+    }
+  | { ok: false };
+
+async function verifyClawHubSession(
+  env: Env,
+  token: string,
+  registry: string | null,
+): Promise<VerifiedClawHubSession> {
+  const verifyUrl = new URL(
+    env.CLAWHUB_SESSION_VERIFY_URL ?? "https://clawhub.ai/api/v1/docs/session/verify",
+  );
+  if (registry && isAllowedClawHubRegistry(registry)) {
+    verifyUrl.protocol = new URL(registry).protocol;
+    verifyUrl.host = new URL(registry).host;
+  }
+  const response = await fetch(verifyUrl.href, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (!response.ok) return { ok: false };
+  const body = (await response.json()) as {
+    provider?: unknown;
+    user?: { id?: unknown; handle?: unknown };
+  };
+  const id = typeof body.user?.id === "string" ? body.user.id : "";
+  if (!id || body.provider !== "github") return { ok: false };
+  return {
+    ok: true,
+    provider: "github",
+    user: {
+      id,
+      handle: typeof body.user?.handle === "string" ? body.user.handle : null,
+    },
+  };
+}
+
+function isAllowedClawHubRegistry(value: string) {
+  try {
+    const url = new URL(value);
+    return (
+      url.origin === "https://clawhub.ai" ||
+      url.origin === "https://hub.openclaw.ai" ||
+      url.origin === "http://localhost:3000" ||
+      url.origin === "http://127.0.0.1:3000"
+    );
+  } catch {
+    return false;
+  }
+}
+
+type SessionPayload = {
+  provider: "github";
+  sub: string;
+  exp: number;
+};
+
+async function hasValidSession(request: Request, env: Env) {
+  const cookie = parseCookies(request.headers.get("Cookie")).get(authCookieName);
+  if (!cookie) return false;
+  const payload = await verifySessionCookie(env, cookie);
+  return Boolean(payload && payload.exp > Math.floor(Date.now() / 1000));
+}
+
+async function createSessionCookie(env: Env, payload: SessionPayload) {
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+  const signature = await signValue(env, encodedPayload);
+  return `${encodedPayload}.${signature}`;
+}
+
+async function verifySessionCookie(env: Env, cookie: string): Promise<SessionPayload | null> {
+  const [payload, signature, extra] = cookie.split(".");
+  if (!payload || !signature || extra) return null;
+  const expected = await signValue(env, payload);
+  if (!constantTimeEqual(signature, expected)) return null;
+  try {
+    const parsed = JSON.parse(base64UrlDecode(payload)) as Partial<SessionPayload>;
+    if (parsed.provider !== "github" || !parsed.sub || typeof parsed.exp !== "number") return null;
+    return parsed as SessionPayload;
+  } catch {
+    return null;
+  }
+}
+
+async function signValue(env: Env, value: string) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(authSecret(env)),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value));
+  return base64UrlEncodeBytes(new Uint8Array(signature));
+}
+
+function authSecret(env: Env) {
+  return env.ASK_MOLTY_AUTH_SECRET || env.OPENAI_API_KEY || "ask-molty-local-dev";
+}
+
+function parseCookies(header: string | null) {
+  const cookies = new Map<string, string>();
+  if (!header) return cookies;
+  for (const part of header.split(";")) {
+    const index = part.indexOf("=");
+    if (index < 0) continue;
+    const key = part.slice(0, index).trim();
+    const value = part.slice(index + 1).trim();
+    if (key) cookies.set(key, value);
+  }
+  return cookies;
+}
+
+function base64UrlEncode(value: string) {
+  return base64UrlEncodeBytes(new TextEncoder().encode(value));
+}
+
+function base64UrlEncodeBytes(bytes: Uint8Array) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64UrlDecode(value: string) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+function constantTimeEqual(a: string, b: string) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+async function sessionResponse(request: Request, env: Env): Promise<Response> {
   const headers = corsHeaders(request);
   headers.set("Content-Type", "application/json");
   headers.set("Cache-Control", "no-store");
   headers.set("X-Content-Type-Options", "nosniff");
+  const authenticated = await hasValidSession(request, env);
   if (request.method === "HEAD") return new Response(null, { headers });
-  return new Response(JSON.stringify({ authenticated: true, provider: "github" }), { headers });
+  return new Response(
+    JSON.stringify({ authenticated, provider: authenticated ? "github" : null }),
+    {
+      status: authenticated ? 200 : 401,
+      headers,
+    },
+  );
 }
 
-function signInPage(request: Request): Response {
-  const returnTo = safeReturnTo(request);
-  if (returnTo) return Response.redirect(returnTo, 302);
+function signInPage(request: Request, env: Env): Response {
+  const returnTo = safeDocsReturnTo(request) ?? new URL("/", request.url).href;
+  const authUrl = new URL(env.CLAWHUB_AUTH_URL ?? "https://hub.openclaw.ai/docs/auth");
+  authUrl.searchParams.set("return_to", returnTo);
+  return Response.redirect(authUrl.href, 302);
+}
+
+async function authCallback(request: Request, env: Env): Promise<Response> {
+  let form: FormData;
+  try {
+    form = await request.formData();
+  } catch {
+    return authErrorPage("Invalid verification response.", 400);
+  }
+
+  const token = stringFormValue(form.get("token"));
+  const returnTo = normalizeDocsReturnTo(stringFormValue(form.get("return_to")));
+  const registry = stringFormValue(form.get("registry"));
+  if (!token || !returnTo) return authErrorPage("Invalid verification response.", 400);
+
+  const verified = await verifyClawHubSession(env, token, registry);
+  if (!verified.ok) return authErrorPage("GitHub verification failed.", 401);
+
+  const cookie = await createSessionCookie(env, {
+    provider: verified.provider,
+    sub: verified.user.handle ?? verified.user.id,
+    exp: Math.floor(Date.now() / 1000) + authCookieMaxAgeSeconds,
+  });
+  const headers = new Headers({
+    Location: returnTo,
+    "Cache-Control": "no-store",
+    "Set-Cookie": `${authCookieName}=${cookie}; Max-Age=${authCookieMaxAgeSeconds}; Path=/ask-molty; HttpOnly; Secure; SameSite=Lax`,
+  });
+  return new Response(null, { status: 302, headers });
+}
+
+function authErrorPage(message: string, status: number): Response {
   return new Response(
-    `<!doctype html><meta charset="utf-8"><title>Ask Molty signed in</title><style>html{color-scheme:dark;background:#0b0a0a;color:#f4eeee;font:16px system-ui,sans-serif}main{max-width:520px;margin:16vh auto;padding:0 24px}a{color:#ff875f}</style><main><h1>Signed in</h1><p>You can return to the OpenClaw docs and ask Molty now.</p><p><a href="/">Back to docs</a></p></main>`,
+    `<!doctype html><meta charset="utf-8"><title>Ask Molty verification failed</title><style>html{color-scheme:dark;background:#0b0a0a;color:#f4eeee;font:16px system-ui,sans-serif}main{max-width:520px;margin:16vh auto;padding:0 24px}a{color:#ff875f}</style><main><h1>Verification failed</h1><p>${escapeHtml(message)}</p><p><a href="/">Back to docs</a></p></main>`,
     {
+      status,
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store",
@@ -544,16 +751,24 @@ function signInPage(request: Request): Response {
   );
 }
 
-function safeReturnTo(request: Request): string | null {
+function safeDocsReturnTo(request: Request): string | null {
   const url = new URL(request.url);
   const value = url.searchParams.get("return_to");
+  return normalizeDocsReturnTo(value);
+}
+
+function normalizeDocsReturnTo(value: string | null): string | null {
   if (!value) return null;
   try {
-    const target = new URL(value, url.origin);
-    if (target.origin !== url.origin) return null;
-    if (target.pathname === url.pathname) return null;
+    const target = new URL(value);
+    if (!allowedOrigins.has(target.origin)) return null;
+    if (!["http:", "https:"].includes(target.protocol)) return null;
     return target.href;
   } catch {
     return null;
   }
+}
+
+function stringFormValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
