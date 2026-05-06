@@ -39,7 +39,7 @@ export default {
       return sessionResponse(request, env);
     if (pathname === "/ask-molty/api/session" && ["GET", "HEAD"].includes(request.method))
       return sessionResponse(request, env);
-    if (pathname === "/ask-molty/sign-in" && request.method === "GET")
+    if (pathname === "/ask-molty/sign-in" && ["GET", "HEAD"].includes(request.method))
       return signInPage(request, env);
     if (!isChatPath(pathname) || request.method !== "POST")
       return new Response("Not found", { status: 404 });
@@ -692,11 +692,12 @@ async function sessionResponse(request: Request, env: Env): Promise<Response> {
   headers.set("Cache-Control", "no-store");
   headers.set("X-Content-Type-Options", "nosniff");
   const authenticated = await hasValidSession(request, env);
-  if (request.method === "HEAD") return new Response(null, { headers });
+  const status = authenticated ? 200 : 401;
+  if (request.method === "HEAD") return new Response(null, { status, headers });
   return new Response(
     JSON.stringify({ authenticated, provider: authenticated ? "github" : null }),
     {
-      status: authenticated ? 200 : 401,
+      status,
       headers,
     },
   );
