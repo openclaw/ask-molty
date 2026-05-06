@@ -29,7 +29,11 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders(request) });
     const pathname = new URL(request.url).pathname;
     if (pathname in artifactUrls) return serveArtifact(request, artifactUrls[pathname] ?? "");
-    if (pathname === "/ask-molty/sign-in" && request.method === "GET") return signInPage();
+    if (isChatPath(pathname) && ["GET", "HEAD"].includes(request.method))
+      return sessionResponse(request);
+    if (pathname === "/ask-molty/api/session" && ["GET", "HEAD"].includes(request.method))
+      return sessionResponse(request);
+    if (pathname === "/ask-molty/sign-in" && request.method === "GET") return signInPage(request);
     if (!isChatPath(pathname) || request.method !== "POST")
       return new Response("Not found", { status: 404 });
     if (!isAllowedChatOrigin(request)) return json(request, { error: "origin not allowed" }, 403);
@@ -495,7 +499,7 @@ function corsHeaders(request: Request): Headers {
   const headers = new Headers();
   const origin = request.headers.get("Origin") ?? "";
   if (allowedOrigins.has(origin)) headers.set("Access-Control-Allow-Origin", origin);
-  headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+  headers.set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
   headers.set("Access-Control-Allow-Headers", "Content-Type");
   headers.set("Access-Control-Expose-Headers", "X-Workspace-File-Count, X-Strategy");
   headers.set("Vary", "Origin");
@@ -517,7 +521,18 @@ function json(request: Request, data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers });
 }
 
-function signInPage(): Response {
+function sessionResponse(request: Request): Response {
+  const headers = corsHeaders(request);
+  headers.set("Content-Type", "application/json");
+  headers.set("Cache-Control", "no-store");
+  headers.set("X-Content-Type-Options", "nosniff");
+  if (request.method === "HEAD") return new Response(null, { headers });
+  return new Response(JSON.stringify({ authenticated: true, provider: "github" }), { headers });
+}
+
+function signInPage(request: Request): Response {
+  const returnTo = safeReturnTo(request);
+  if (returnTo) return Response.redirect(returnTo, 302);
   return new Response(
     `<!doctype html><meta charset="utf-8"><title>Ask Molty signed in</title><style>html{color-scheme:dark;background:#0b0a0a;color:#f4eeee;font:16px system-ui,sans-serif}main{max-width:520px;margin:16vh auto;padding:0 24px}a{color:#ff875f}</style><main><h1>Signed in</h1><p>You can return to the OpenClaw docs and ask Molty now.</p><p><a href="/">Back to docs</a></p></main>`,
     {
@@ -527,4 +542,18 @@ function signInPage(): Response {
       },
     },
   );
+}
+
+function safeReturnTo(request: Request): string | null {
+  const url = new URL(request.url);
+  const value = url.searchParams.get("return_to");
+  if (!value) return null;
+  try {
+    const target = new URL(value, url.origin);
+    if (target.origin !== url.origin) return null;
+    if (target.pathname === url.pathname) return null;
+    return target.href;
+  } catch {
+    return null;
+  }
 }
