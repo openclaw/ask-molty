@@ -1,6 +1,12 @@
 import { buildWorkspace, readWorkspace, searchWorkspace, workspaceContext } from "./retrieval";
 import { systemPrompt } from "./prompt";
-import type { Env, OpenAIChatResponse, OpenAIMessage, WorkspaceFile } from "./types";
+import type {
+  Env,
+  OpenAIChatResponse,
+  OpenAIMessage,
+  OpenAIStreamChunk,
+  WorkspaceFile,
+} from "./types";
 
 const allowedOrigins = new Set([
   "https://documentation.openclaw.ai",
@@ -39,10 +45,12 @@ export default {
 
     try {
       const workspace = await buildWorkspace(env, message);
-      const answer = compactGithubLinks(await answerWithTools(env, message, workspace));
+      const messages = await messagesWithTools(env, message, workspace);
+      const answer = await streamAnswer(env, messages);
       const headers = corsHeaders(request);
       headers.set("Content-Type", "text/plain; charset=utf-8");
       headers.set("Cache-Control", "no-store");
+      headers.set("X-Content-Type-Options", "nosniff");
       headers.set("X-Workspace-File-Count", String(workspace.length));
       headers.set("X-Strategy", "workspace-tools-rag");
       return new Response(answer, { headers });
@@ -77,11 +85,11 @@ async function serveArtifact(request: Request, url: string): Promise<Response> {
   return request.method === "HEAD" ? new Response(null, response) : response;
 }
 
-async function answerWithTools(
+async function messagesWithTools(
   env: Env,
   question: string,
   workspace: WorkspaceFile[],
-): Promise<string> {
+): Promise<OpenAIMessage[]> {
   const messages: OpenAIMessage[] = [
     { role: "system", content: systemPrompt },
     {
@@ -98,10 +106,10 @@ Use workspace tools if you need to search or read exact files before answering.`
   for (let round = 0; round < maxToolRounds; round += 1) {
     const response = await openAI(env, messages, true);
     const assistant = response.choices?.[0]?.message;
-    if (!assistant) return "No answer returned.";
-    messages.push(assistant);
+    if (!assistant) return messages;
     const calls = assistant.tool_calls ?? [];
-    if (!calls.length) return assistant.content?.trim() || "No answer returned.";
+    if (!calls.length) return messages;
+    messages.push(assistant);
     for (const call of calls) {
       messages.push({
         role: "tool",
@@ -111,8 +119,7 @@ Use workspace tools if you need to search or read exact files before answering.`
     }
   }
 
-  const finalResponse = await openAI(env, messages, false);
-  return finalResponse.choices?.[0]?.message?.content?.trim() || "No answer returned.";
+  return messages;
 }
 
 function runTool(workspace: WorkspaceFile[], name: string, rawArgs: string): unknown {
@@ -295,11 +302,102 @@ function truncateShell(value: string): string {
     : value;
 }
 
+async function streamAnswer(
+  env: Env,
+  messages: OpenAIMessage[],
+): Promise<ReadableStream<Uint8Array>> {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: openAIHeaders(env),
+    body: JSON.stringify({ ...openAIBody(env, messages, false), stream: true }),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`OpenAI error ${response.status}: ${text.slice(0, 300)}`);
+  }
+  if (!response.body) throw new Error("OpenAI stream missing response body");
+  return response.body.pipeThrough(openAITextStream());
+}
+
+function openAITextStream(): TransformStream<Uint8Array, Uint8Array> {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let sseBuffer = "";
+  let textBuffer = "";
+
+  const flushText = (controller: TransformStreamDefaultController<Uint8Array>, force = false) => {
+    const flushLength = force ? textBuffer.length : safeFlushLength(textBuffer);
+    if (!flushLength) return;
+    controller.enqueue(encoder.encode(compactGithubLinks(textBuffer.slice(0, flushLength))));
+    textBuffer = textBuffer.slice(flushLength);
+  };
+
+  const processEvent = (
+    event: string,
+    controller: TransformStreamDefaultController<Uint8Array>,
+  ) => {
+    for (const line of event.split("\n")) {
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+      const parsed = JSON.parse(data) as OpenAIStreamChunk;
+      const content = parsed.choices?.[0]?.delta?.content;
+      if (!content) continue;
+      textBuffer += content;
+      flushText(controller);
+    }
+  };
+
+  return new TransformStream({
+    transform(chunk, controller) {
+      sseBuffer += decoder.decode(chunk, { stream: true });
+      const events = sseBuffer.split(/\r?\n\r?\n/);
+      sseBuffer = events.pop() ?? "";
+      for (const event of events) processEvent(event, controller);
+    },
+    flush(controller) {
+      const rest = decoder.decode();
+      if (rest) sseBuffer += rest;
+      if (sseBuffer.trim()) processEvent(sseBuffer, controller);
+      flushText(controller, true);
+    },
+  });
+}
+
+function safeFlushLength(text: string): number {
+  const rawUrlStart = text.lastIndexOf("https://github.com/openclaw/openclaw/");
+  if (rawUrlStart >= 0 && !/[\s)]/.test(text.slice(rawUrlStart))) return rawUrlStart;
+
+  const prefix = "https://github.com/openclaw/openclaw/";
+  for (let length = Math.min(prefix.length - 1, text.length); length > 0; length -= 1)
+    if (prefix.startsWith(text.slice(-length))) return text.length - length;
+
+  return text.length;
+}
+
 async function openAI(
   env: Env,
   messages: OpenAIMessage[],
   withTools: boolean,
 ): Promise<OpenAIChatResponse> {
+  const body = openAIBody(env, messages, withTools);
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: openAIHeaders(env),
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`OpenAI error ${response.status}: ${text.slice(0, 300)}`);
+  }
+  return response.json<OpenAIChatResponse>();
+}
+
+function openAIBody(
+  env: Env,
+  messages: OpenAIMessage[],
+  withTools: boolean,
+): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: env.OPENAI_MODEL ?? "chat-latest",
     messages,
@@ -371,19 +469,14 @@ async function openAI(
     ];
     body.tool_choice = "auto";
   }
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`OpenAI error ${response.status}: ${text.slice(0, 300)}`);
-  }
-  return response.json<OpenAIChatResponse>();
+  return body;
+}
+
+function openAIHeaders(env: Env): HeadersInit {
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+  };
 }
 
 function corsHeaders(request: Request): Headers {

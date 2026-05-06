@@ -48,3 +48,11 @@ export interface OpenAIChatResponse {
     message?: OpenAIMessage;
   }>;
 }
+
+export interface OpenAIStreamChunk {
+  choices?: Array<{
+    delta?: {
+      content?: string;
+    };
+  }>;
+}
