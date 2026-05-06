@@ -174,7 +174,23 @@ function compactGithubLinks(text: string): string {
       /(^|[\s>])https:\/\/github\.com\/openclaw\/openclaw\/commit\/([0-9a-f]{7,40})\/?(?=[\s).,;!?]|$)/gi,
       (_match, prefix: string, sha: string) =>
         `${prefix}[commit ${sha.slice(0, 7)}](https://github.com/openclaw/openclaw/commit/${sha})`,
+    )
+    .replace(
+      /(^|[\s>])https:\/\/github\.com\/openclaw\/openclaw\/blob\/([0-9a-f]{7,40})\/([^\s)]+)/gi,
+      (_match, prefix: string, sha: string, path: string) => {
+        const cleanPath = trimTrailingPunctuation(path);
+        const suffix = path.slice(cleanPath.length);
+        const label = decodeURIComponent(cleanPath).replace(
+          /#L(\d+)(?:-L(\d+))?$/,
+          (_line, from, to) => (to ? `:L${from}-L${to}` : `:L${from}`),
+        );
+        return `${prefix}[${label}](https://github.com/openclaw/openclaw/blob/${sha}/${cleanPath})${suffix}`;
+      },
     );
+}
+
+function trimTrailingPunctuation(value: string): string {
+  return value.replace(/[.,;!?]+$/, "");
 }
 
 function runReadOnlyShell(
