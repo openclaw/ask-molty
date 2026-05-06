@@ -20,9 +20,11 @@ export async function buildWorkspace(env: Env, query: string): Promise<Workspace
   const githubMatches = selectRecords(github, query, githubSeeking(query) ? 12 : 4);
 
   const files: WorkspaceFile[] = [];
+  const githubSummary = githubSummaryFile(github, query);
+  if (githubSummary) files.push(githubSummary);
   for (const record of docMatches) files.push(recordToWorkspaceFile(record));
   for (const record of sourceMatches) files.push(await sourceToWorkspaceFile(record));
-  for (const record of githubMatches) files.push(recordToWorkspaceFile(record));
+  for (const record of githubMatches) files.push(githubToWorkspaceFile(record));
   return dedupeWorkspace(files).slice(0, 32);
 }
 
@@ -143,18 +145,70 @@ function selectRecords(records: SearchRecord[], query: string, limit: number): S
       }, 0);
       return {
         record,
-        score:
-          exactBonus +
-          scoreText(
-            `${record.title ?? ""}\n${record.path}\n${record.url ?? ""}\n${record.search}`,
-            terms,
-          ),
+        score: exactBonus + scoreText(recordSearchText(record), terms),
       };
     })
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map((item) => item.record);
+}
+
+function githubToWorkspaceFile(record: SearchRecord): WorkspaceFile {
+  const type = githubRecordType(record);
+  const issuePath = type === "pull request" ? "pr" : type;
+  const path = record.number ? `/workspace/github/${issuePath}-${record.number}.md` : record.path;
+  const labels = record.labels?.length ? `labels: ${record.labels.join(", ")}` : "";
+  const files = record.files?.length ? `files: ${record.files.join(", ")}` : "";
+  const frontmatter = [
+    "---",
+    `kind: github`,
+    `github_type: ${yamlString(type)}`,
+    record.title ? `title: ${yamlString(record.title)}` : "",
+    record.number ? `number: ${record.number}` : "",
+    record.state ? `state: ${record.state}` : "",
+    record.url ? `url: ${record.url}` : "",
+    labels,
+    files,
+    "---",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return {
+    path,
+    kind: "github",
+    url: record.url,
+    content:
+      `${frontmatter}\n\n# ${type} #${record.number ?? ""}: ${record.title ?? record.path}\n\nGitHub: ${record.url ?? ""}\nState: ${record.state ?? ""}\n\n${record.search}`.slice(
+        0,
+        5000,
+      ),
+  };
+}
+
+function githubSummaryFile(records: SearchRecord[], query: string): WorkspaceFile | undefined {
+  if (!wantsOpenPullRequestList(query)) return undefined;
+  const openPullRequests = records
+    .filter((record) => record.state === "open" && githubRecordType(record) === "pull request")
+    .sort((a, b) => (b.number ?? 0) - (a.number ?? 0));
+  const displayed = openPullRequests.slice(0, 100);
+  const lines = [
+    "# Open GitHub pull requests",
+    "",
+    `Total open pull requests in indexed GitHub data: ${openPullRequests.length}.`,
+    displayed.length < openPullRequests.length
+      ? `Showing newest ${displayed.length}; ask for a narrower topic to search within all indexed PRs.`
+      : "Showing all indexed open pull requests.",
+    "",
+    ...displayed.map(
+      (record) => `- PR #${record.number} — ${record.title ?? "(untitled)"}\n  ${record.url ?? ""}`,
+    ),
+  ];
+  return {
+    path: "/workspace/github/open-pull-requests.md",
+    kind: "github",
+    content: lines.join("\n"),
+  };
 }
 
 function recordToWorkspaceFile(record: SearchRecord): WorkspaceFile {
@@ -208,6 +262,28 @@ function scoreText(text: string, terms: string[]): number {
   return score;
 }
 
+function recordSearchText(record: SearchRecord): string {
+  return [
+    record.title,
+    record.path,
+    record.url,
+    record.kind === "github" ? githubRecordType(record) : "",
+    record.kind === "github" && githubRecordType(record) === "pull request"
+      ? "pr prs pull request"
+      : "",
+    record.state,
+    record.labels?.join(" "),
+    record.files?.join(" "),
+    record.search,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function githubRecordType(record: SearchRecord): "issue" | "pull request" {
+  return record.url?.includes("/pull/") || /#pr-\d+/.test(record.path) ? "pull request" : "issue";
+}
+
 function snippet(text: string, terms: string[]): string {
   const lower = text.toLowerCase();
   let index = 0;
@@ -226,7 +302,10 @@ function snippet(text: string, terms: string[]): string {
 }
 
 function tokenize(input: string): string[] {
-  return [...new Set(input.toLowerCase().match(/[a-z0-9][a-z0-9-]{2,}/g) ?? [])]
+  const terms: string[] = input.toLowerCase().match(/[a-z0-9][a-z0-9-]{1,}/g) ?? [];
+  if (/\b(pr|prs|pull request|pull requests)\b/i.test(input)) terms.push("pr", "pull", "request");
+  if (/\b(issue|issues)\b/i.test(input)) terms.push("issue");
+  return [...new Set(terms)]
     .filter(
       (term) =>
         ![
@@ -276,6 +355,10 @@ function githubSeeking(input: string): boolean {
   return /\b(issue|issues|pr|pull request|pull requests|bug|known|fixed|closed|merged|regression|discussion|comment|commit|github|#\d+)\b/i.test(
     input,
   );
+}
+
+function wantsOpenPullRequestList(input: string): boolean {
+  return /\bopen\b/i.test(input) && /\b(pr|prs|pull request|pull requests)\b/i.test(input);
 }
 
 function dedupeWorkspace(files: WorkspaceFile[]): WorkspaceFile[] {
