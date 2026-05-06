@@ -10,9 +10,9 @@
     "dev": "wrangler dev --config wrangler.toml",
     "export": "tsx scripts/export-workspace.ts",
     "export:test": "ASK_MOLTY_OUT_DIR=dist/test tsx scripts/export-workspace.ts",
-    "format": "oxfmt --write .",
-    "format:check": "oxfmt --check .",
-    "lint": "oxlint .",
+    "format": "oxfmt --write src scripts .github package.json package-lock.json tsconfig.base.json tsconfig.worker.json tsconfig.scripts.json .oxlintrc.json .oxfmtrc.json wrangler.toml README.md",
+    "format:check": "oxfmt --check src scripts .github package.json package-lock.json tsconfig.base.json tsconfig.worker.json tsconfig.scripts.json .oxlintrc.json .oxfmtrc.json wrangler.toml README.md",
+    "lint": "oxlint src scripts",
     "smoke": "tsx scripts/smoke.ts",
     "typecheck": "tsgo -p tsconfig.worker.json --noEmit && tsgo -p tsconfig.scripts.json --noEmit"
   },
