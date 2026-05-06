@@ -5,6 +5,7 @@ compatibility_date = "2026-05-06"
 routes = [
   { pattern = "docs-chat.openclaw.ai/*", zone_name = "openclaw.ai" },
   { pattern = "documentation.openclaw.ai/ask-molty/*", zone_name = "openclaw.ai" },
+  { pattern = "docs.openclaw.ai/ask-molty/*", zone_name = "openclaw.ai" },
 ]
 
 [vars]
