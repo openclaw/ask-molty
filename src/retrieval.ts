@@ -136,8 +136,9 @@ function selectRecords(records: SearchRecord[], query: string, limit: number): S
       const pathText = `${record.title ?? ""}\n${record.path}\n${record.url ?? ""}`.toLowerCase();
       const searchText = record.search.toLowerCase();
       const exactBonus = terms.reduce((score, term) => {
-        if (pathText.includes(term)) return score + 100 + term.length;
-        if (term.includes("-") && searchText.includes(term)) return score + 40 + term.length;
+        const filenameBonus = term.includes("-") ? 1000 : 100;
+        if (pathText.includes(term)) return score + filenameBonus + term.length;
+        if (term.includes("-") && searchText.includes(term)) return score + 400 + term.length;
         return score;
       }, 0);
       return {
@@ -228,7 +229,39 @@ function tokenize(input: string): string[] {
   return [...new Set(input.toLowerCase().match(/[a-z0-9][a-z0-9-]{2,}/g) ?? [])]
     .filter(
       (term) =>
-        !["the", "and", "for", "with", "how", "what", "does", "openclaw", "molty"].includes(term),
+        ![
+          "and",
+          "cite",
+          "code",
+          "contains",
+          "does",
+          "exact",
+          "exactly",
+          "file",
+          "files",
+          "for",
+          "github",
+          "how",
+          "link",
+          "list",
+          "list-workspace",
+          "mounted",
+          "molty",
+          "only",
+          "openclaw",
+          "output",
+          "path",
+          "paths",
+          "report",
+          "run",
+          "source",
+          "the",
+          "use",
+          "what",
+          "which",
+          "with",
+          "workspace",
+        ].includes(term),
     )
     .slice(0, 24);
 }
