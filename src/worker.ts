@@ -133,7 +133,7 @@ function runTool(workspace: WorkspaceFile[], name: string, rawArgs: string): unk
     const file = readWorkspace(workspace, path);
     if (!file) return { error: `file not mounted: ${path}` };
     return {
-      path: file.path,
+      path: displayToolPath(file),
       kind: file.kind,
       url: file.url,
       content: file.content.slice(0, 12_000),
@@ -144,7 +144,7 @@ function runTool(workspace: WorkspaceFile[], name: string, rawArgs: string): unk
     return {
       files: workspace
         .filter((file) => !prefix || file.path.replace(/^\/+/, "").startsWith(prefix))
-        .map((file) => ({ path: file.path, kind: file.kind, url: file.url })),
+        .map((file) => ({ path: displayToolPath(file), kind: file.kind, url: file.url })),
     };
   }
   if (name === "run_shell") {
@@ -152,6 +152,10 @@ function runTool(workspace: WorkspaceFile[], name: string, rawArgs: string): unk
     return runReadOnlyShell(workspace, command);
   }
   return { error: `unknown tool: ${name}` };
+}
+
+function displayToolPath(file: WorkspaceFile): string {
+  return file.kind === "github" && file.url ? file.url : file.path;
 }
 
 function runReadOnlyShell(

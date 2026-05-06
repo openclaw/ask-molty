@@ -57,7 +57,7 @@ export function searchWorkspace(
     .sort((a, b) => b.score - a.score)
     .slice(0, Math.max(1, Math.min(limit, 20)))
     .map(({ file, score }) => ({
-      path: file.path,
+      path: displayPath(file),
       kind: file.kind,
       url: file.url,
       score,
@@ -75,7 +75,7 @@ export function workspaceContext(files: WorkspaceFile[]): string {
     .slice(0, 16)
     .map(
       (file) =>
-        `Path: ${file.path}\nKind: ${file.kind}\nURL: ${file.url ?? ""}\n\n${file.content.slice(0, 1800)}`,
+        `${displayPathLabel(file)}\nKind: ${file.kind}\nURL: ${file.url ?? ""}\n\n${file.content.slice(0, 1800)}`,
     )
     .join("\n\n---\n\n");
 }
@@ -282,6 +282,14 @@ function recordSearchText(record: SearchRecord): string {
 
 function githubRecordType(record: SearchRecord): "issue" | "pull request" {
   return record.url?.includes("/pull/") || /#pr-\d+/.test(record.path) ? "pull request" : "issue";
+}
+
+function displayPath(file: WorkspaceFile): string {
+  return file.kind === "github" && file.url ? file.url : file.path;
+}
+
+function displayPathLabel(file: WorkspaceFile): string {
+  return file.kind === "github" ? `GitHub: ${file.url ?? ""}` : `Path: ${file.path}`;
 }
 
 function snippet(text: string, terms: string[]): string {
