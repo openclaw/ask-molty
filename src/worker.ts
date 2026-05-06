@@ -12,12 +12,18 @@ const allowedOrigins = new Set([
 const maxMessageLength = 2000;
 const maxToolRounds = 4;
 const maxShellOutput = 16_000;
+const artifactUrls: Record<string, string> = {
+  "/ask-molty/github-search.jsonl":
+    "https://github.com/openclaw/ask-molty/releases/download/workspace-latest/github-search.jsonl",
+};
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === "OPTIONS")
       return new Response(null, { status: 204, headers: corsHeaders(request) });
-    if (new URL(request.url).pathname !== "/api/chat" || request.method !== "POST")
+    const pathname = new URL(request.url).pathname;
+    if (pathname in artifactUrls) return serveArtifact(request, artifactUrls[pathname] ?? "");
+    if (pathname !== "/api/chat" || request.method !== "POST")
       return new Response("Not found", { status: 404 });
     if (!env.OPENAI_API_KEY) return json(request, { error: "OPENAI_API_KEY missing" }, 500);
 
@@ -49,6 +55,27 @@ export default {
     }
   },
 };
+
+async function serveArtifact(request: Request, url: string): Promise<Response> {
+  if (!["GET", "HEAD"].includes(request.method))
+    return new Response("Method not allowed", { status: 405 });
+  const cache = caches.default;
+  const cacheKey = new Request(request.url, { method: "GET" });
+  const cached = await cache.match(cacheKey);
+  if (cached) return request.method === "HEAD" ? new Response(null, cached) : cached;
+
+  const upstream = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 3600 } });
+  if (!upstream.ok)
+    return new Response(`Artifact unavailable: ${upstream.status}`, { status: 502 });
+  const headers = new Headers(upstream.headers);
+  headers.set("Access-Control-Allow-Origin", "*");
+  headers.set("Cache-Control", "public, max-age=300, s-maxage=3600");
+  headers.set("Content-Type", "application/x-ndjson; charset=utf-8");
+  headers.delete("Content-Disposition");
+  const response = new Response(upstream.body, { headers, status: upstream.status });
+  await cache.put(cacheKey, response.clone());
+  return request.method === "HEAD" ? new Response(null, response) : response;
+}
 
 async function answerWithTools(
   env: Env,
