@@ -158,6 +158,7 @@ function githubToWorkspaceFile(record: SearchRecord): WorkspaceFile {
   const type = githubRecordType(record);
   const issuePath = type === "pull request" ? "pr" : type;
   const path = record.number ? `/workspace/github/${issuePath}-${record.number}.md` : record.path;
+  const label = githubLinkLabel(record);
   const labels = record.labels?.length ? `labels: ${record.labels.join(", ")}` : "";
   const files = record.files?.length ? `files: ${record.files.join(", ")}` : "";
   const frontmatter = [
@@ -179,7 +180,7 @@ function githubToWorkspaceFile(record: SearchRecord): WorkspaceFile {
     kind: "github",
     url: record.url,
     content:
-      `${frontmatter}\n\n# ${type} #${record.number ?? ""}: ${record.title ?? record.path}\n\nGitHub: ${record.url ?? ""}\nState: ${record.state ?? ""}\n\n${record.search}`.slice(
+      `${frontmatter}\n\n# ${label}: ${record.title ?? record.path}\n\nGitHub: ${markdownLink(label, record.url)}\nState: ${record.state ?? ""}\n\n${record.search}`.slice(
         0,
         5000,
       ),
@@ -201,7 +202,8 @@ function githubSummaryFile(records: SearchRecord[], query: string): WorkspaceFil
       : "Showing all indexed open pull requests.",
     "",
     ...displayed.map(
-      (record) => `- PR #${record.number} — ${record.title ?? "(untitled)"}\n  ${record.url ?? ""}`,
+      (record) =>
+        `- ${markdownLink(githubLinkLabel(record), record.url)} — ${record.title ?? "(untitled)"}`,
     ),
   ];
   return {
@@ -284,12 +286,35 @@ function githubRecordType(record: SearchRecord): "issue" | "pull request" {
   return record.url?.includes("/pull/") || /#pr-\d+/.test(record.path) ? "pull request" : "issue";
 }
 
+function githubLinkLabel(record: SearchRecord): string {
+  const fallback = record.title ?? record.path;
+  if (!record.number) return fallback;
+  return githubRecordType(record) === "pull request"
+    ? `PR #${record.number}`
+    : `Issue #${record.number}`;
+}
+
+function markdownLink(label: string, url?: string): string {
+  return url ? `[${label}](${url})` : label;
+}
+
+function githubUrlLabel(url?: string): string {
+  if (!url) return "";
+  const issue = url.match(/\/issues\/(\d+)\/?$/)?.[1];
+  if (issue) return markdownLink(`Issue #${issue}`, url);
+  const pullRequest = url.match(/\/pull\/(\d+)\/?$/)?.[1];
+  if (pullRequest) return markdownLink(`PR #${pullRequest}`, url);
+  const commit = url.match(/\/commit\/([0-9a-f]{7,40})\/?$/i)?.[1];
+  if (commit) return markdownLink(`commit ${commit.slice(0, 7)}`, url);
+  return url;
+}
+
 function displayPath(file: WorkspaceFile): string {
   return file.kind === "github" && file.url ? file.url : file.path;
 }
 
 function displayPathLabel(file: WorkspaceFile): string {
-  return file.kind === "github" ? `GitHub: ${file.url ?? ""}` : `Path: ${file.path}`;
+  return file.kind === "github" ? `GitHub: ${githubUrlLabel(file.url)}` : `Path: ${file.path}`;
 }
 
 function snippet(text: string, terms: string[]): string {

@@ -39,7 +39,7 @@ export default {
 
     try {
       const workspace = await buildWorkspace(env, message);
-      const answer = await answerWithTools(env, message, workspace);
+      const answer = compactGithubLinks(await answerWithTools(env, message, workspace));
       const headers = corsHeaders(request);
       headers.set("Content-Type", "text/plain; charset=utf-8");
       headers.set("Cache-Control", "no-store");
@@ -156,6 +156,25 @@ function runTool(workspace: WorkspaceFile[], name: string, rawArgs: string): unk
 
 function displayToolPath(file: WorkspaceFile): string {
   return file.kind === "github" && file.url ? file.url : file.path;
+}
+
+function compactGithubLinks(text: string): string {
+  return text
+    .replace(
+      /(^|[\s>])https:\/\/github\.com\/openclaw\/openclaw\/issues\/(\d+)\/?(?=[\s).,;!?]|$)/g,
+      (_match, prefix: string, number: string) =>
+        `${prefix}[Issue #${number}](https://github.com/openclaw/openclaw/issues/${number})`,
+    )
+    .replace(
+      /(^|[\s>])https:\/\/github\.com\/openclaw\/openclaw\/pull\/(\d+)\/?(?=[\s).,;!?]|$)/g,
+      (_match, prefix: string, number: string) =>
+        `${prefix}[PR #${number}](https://github.com/openclaw/openclaw/pull/${number})`,
+    )
+    .replace(
+      /(^|[\s>])https:\/\/github\.com\/openclaw\/openclaw\/commit\/([0-9a-f]{7,40})\/?(?=[\s).,;!?]|$)/gi,
+      (_match, prefix: string, sha: string) =>
+        `${prefix}[commit ${sha.slice(0, 7)}](https://github.com/openclaw/openclaw/commit/${sha})`,
+    );
 }
 
 function runReadOnlyShell(
