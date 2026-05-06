@@ -29,6 +29,7 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders(request) });
     const pathname = new URL(request.url).pathname;
     if (pathname in artifactUrls) return serveArtifact(request, artifactUrls[pathname] ?? "");
+    if (pathname === "/ask-molty/sign-in" && request.method === "GET") return signInPage();
     if (!isChatPath(pathname) || request.method !== "POST")
       return new Response("Not found", { status: 404 });
     if (!isAllowedChatOrigin(request)) return json(request, { error: "origin not allowed" }, 403);
@@ -514,4 +515,16 @@ function json(request: Request, data: unknown, status = 200): Response {
   const headers = corsHeaders(request);
   headers.set("Content-Type", "application/json");
   return new Response(JSON.stringify(data), { status, headers });
+}
+
+function signInPage(): Response {
+  return new Response(
+    `<!doctype html><meta charset="utf-8"><title>Ask Molty signed in</title><style>html{color-scheme:dark;background:#0b0a0a;color:#f4eeee;font:16px system-ui,sans-serif}main{max-width:520px;margin:16vh auto;padding:0 24px}a{color:#ff875f}</style><main><h1>Signed in</h1><p>You can return to the OpenClaw docs and ask Molty now.</p><p><a href="/">Back to docs</a></p></main>`,
+    {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+      },
+    },
+  );
 }
