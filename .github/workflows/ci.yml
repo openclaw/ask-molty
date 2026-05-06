@@ -45,11 +45,63 @@ jobs:
           ref: ${{ steps.source.outputs.sha }}
           repository: openclaw/openclaw
 
-      - name: Checkout gitcrawl store
-        uses: actions/checkout@v6
-        with:
-          path: gitcrawl-store
-          repository: openclaw/gitcrawl-store
+      - name: Create gitcrawl fixture
+        run: |
+          mkdir -p dist
+          sqlite3 dist/gitcrawl-fixture.db <<'SQL'
+          create table repositories (id integer primary key, full_name text not null);
+          create table threads (
+            id integer primary key,
+            repo_id integer not null,
+            number integer not null,
+            kind text not null,
+            state text not null,
+            title text not null,
+            body text,
+            body_excerpt text,
+            body_length integer,
+            author_login text,
+            html_url text,
+            labels_json text,
+            assignees_json text,
+            is_draft integer,
+            created_at_gh text,
+            updated_at_gh text,
+            closed_at_gh text,
+            merged_at_gh text
+          );
+          create table comments (
+            id integer primary key,
+            thread_id integer not null,
+            comment_type text,
+            author_login text,
+            body text,
+            created_at_gh text,
+            updated_at_gh text
+          );
+          create table pull_request_files (
+            id integer primary key,
+            thread_id integer not null,
+            path text,
+            status text,
+            additions integer,
+            deletions integer,
+            changes integer
+          );
+          create table pull_request_commits (
+            id integer primary key,
+            thread_id integer not null,
+            sha text,
+            message text,
+            html_url text,
+            committed_at text
+          );
+          insert into repositories (id, full_name) values (1, 'openclaw/openclaw');
+          insert into threads (id, repo_id, number, kind, state, title, body, body_length, author_login, html_url, labels_json, created_at_gh, updated_at_gh)
+            values (10, 1, 42, 'issue', 'open', 'Fixture docs agent issue', 'Fixture body for Ask Molty GitHub search.', 42, 'molty', 'https://github.com/openclaw/openclaw/issues/42', '["docs"]', '2026-05-06T00:00:00Z', '2026-05-06T00:00:00Z');
+          insert into comments (thread_id, comment_type, author_login, body, created_at_gh, updated_at_gh)
+            values (10, 'issue_comment', 'val', 'Prefer docs links first.', '2026-05-06T00:00:00Z', '2026-05-06T00:00:00Z');
+          SQL
 
       - name: Typecheck
         run: npm run typecheck
@@ -64,8 +116,7 @@ jobs:
         run: npm run export
         env:
           ASK_MOLTY_DOCS_REPO: docs-openclaw
-          ASK_MOLTY_GITCRAWL_DB: gitcrawl-store/data/openclaw__openclaw.sync.db
-          ASK_MOLTY_GITCRAWL_STORE: gitcrawl-store
+          ASK_MOLTY_GITCRAWL_DB: dist/gitcrawl-fixture.db
           ASK_MOLTY_OUT_DIR: dist/test
           ASK_MOLTY_SOURCE_REPO: clawdbot5
 
