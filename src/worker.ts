@@ -29,7 +29,7 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders(request) });
     const pathname = new URL(request.url).pathname;
     if (pathname in artifactUrls) return serveArtifact(request, artifactUrls[pathname] ?? "");
-    if (pathname !== "/api/chat" || request.method !== "POST")
+    if (!isChatPath(pathname) || request.method !== "POST")
       return new Response("Not found", { status: 404 });
     if (!isAllowedChatOrigin(request)) return json(request, { error: "origin not allowed" }, 403);
     if (!env.OPENAI_API_KEY) return json(request, { error: "OPENAI_API_KEY missing" }, 500);
@@ -504,6 +504,10 @@ function corsHeaders(request: Request): Headers {
 function isAllowedChatOrigin(request: Request): boolean {
   const origin = request.headers.get("Origin");
   return Boolean(origin && allowedOrigins.has(origin));
+}
+
+function isChatPath(pathname: string): boolean {
+  return pathname === "/api/chat" || pathname === "/ask-molty/api/chat";
 }
 
 function json(request: Request, data: unknown, status = 200): Response {
