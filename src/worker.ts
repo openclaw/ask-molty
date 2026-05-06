@@ -365,10 +365,20 @@ function openAITextStream(): TransformStream<Uint8Array, Uint8Array> {
 }
 
 function safeFlushLength(text: string): number {
+  const prefix = "https://github.com/openclaw/openclaw/";
+  const markdownTargetStart = text.lastIndexOf("](");
+  if (markdownTargetStart >= 0) {
+    const markdownTarget = text.slice(markdownTargetStart + 2);
+    if (
+      !markdownTarget.includes(")") &&
+      (!markdownTarget || prefix.startsWith(markdownTarget) || markdownTarget.startsWith(prefix))
+    )
+      return markdownTargetStart;
+  }
+
   const rawUrlStart = text.lastIndexOf("https://github.com/openclaw/openclaw/");
   if (rawUrlStart >= 0 && !/[\s)]/.test(text.slice(rawUrlStart))) return rawUrlStart;
 
-  const prefix = "https://github.com/openclaw/openclaw/";
   for (let length = Math.min(prefix.length - 1, text.length); length > 0; length -= 1)
     if (prefix.startsWith(text.slice(-length))) return text.length - length;
 
