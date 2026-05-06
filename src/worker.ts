@@ -31,6 +31,7 @@ export default {
     if (pathname in artifactUrls) return serveArtifact(request, artifactUrls[pathname] ?? "");
     if (pathname !== "/api/chat" || request.method !== "POST")
       return new Response("Not found", { status: 404 });
+    if (!isAllowedChatOrigin(request)) return json(request, { error: "origin not allowed" }, 403);
     if (!env.OPENAI_API_KEY) return json(request, { error: "OPENAI_API_KEY missing" }, 500);
 
     let message = "";
@@ -498,6 +499,11 @@ function corsHeaders(request: Request): Headers {
   headers.set("Access-Control-Expose-Headers", "X-Workspace-File-Count, X-Strategy");
   headers.set("Vary", "Origin");
   return headers;
+}
+
+function isAllowedChatOrigin(request: Request): boolean {
+  const origin = request.headers.get("Origin");
+  return Boolean(origin && allowedOrigins.has(origin));
 }
 
 function json(request: Request, data: unknown, status = 200): Response {
