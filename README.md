@@ -70,7 +70,7 @@ Docs chat auth is brokered through ClawHub:
 
 - `CLAWHUB_AUTH_URL` sends users to `https://hub.openclaw.ai/docs/auth`.
 - `CLAWHUB_SESSION_VERIFY_URL` verifies the ClawHub Convex Auth token once.
-- `ASK_MOLTY_AUTH_SECRET` is optional; when set, it signs the docs-only session cookie.
+- `ASK_MOLTY_AUTH_SECRET` signs the docs-only session cookie; set it in production so OpenAI key rotation does not invalidate sessions.
 
 ```bash
 npm run deploy

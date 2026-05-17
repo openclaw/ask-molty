@@ -70,11 +70,7 @@ export default {
       headers.set("X-Strategy", "workspace-tools-rag");
       return new Response(answer, { headers });
     } catch (error) {
-      return json(
-        request,
-        { error: error instanceof Error ? error.message : "Ask Molty failed" },
-        502,
-      );
+      return json(request, { error: publicErrorMessage(error) }, 502);
     }
   },
 };
@@ -597,20 +593,24 @@ type SessionPayload = {
 async function hasValidSession(request: Request, env: Env) {
   const cookie = parseCookies(request.headers.get("Cookie")).get(authCookieName);
   if (!cookie) return false;
-  const payload = await verifySessionCookie(env, cookie);
+  const payload = await verifySessionCookie(env, cookie, request);
   return Boolean(payload && payload.exp > Math.floor(Date.now() / 1000));
 }
 
-async function createSessionCookie(env: Env, payload: SessionPayload) {
+async function createSessionCookie(env: Env, payload: SessionPayload, request: Request) {
   const encodedPayload = base64UrlEncode(JSON.stringify(payload));
-  const signature = await signValue(env, encodedPayload);
+  const signature = await signValue(env, encodedPayload, request);
   return `${encodedPayload}.${signature}`;
 }
 
-async function verifySessionCookie(env: Env, cookie: string): Promise<SessionPayload | null> {
+async function verifySessionCookie(
+  env: Env,
+  cookie: string,
+  request: Request,
+): Promise<SessionPayload | null> {
   const [payload, signature, extra] = cookie.split(".");
   if (!payload || !signature || extra) return null;
-  const expected = await signValue(env, payload);
+  const expected = await signValue(env, payload, request);
   if (!constantTimeEqual(signature, expected)) return null;
   try {
     const parsed = JSON.parse(base64UrlDecode(payload)) as Partial<SessionPayload>;
@@ -621,10 +621,10 @@ async function verifySessionCookie(env: Env, cookie: string): Promise<SessionPay
   }
 }
 
-async function signValue(env: Env, value: string) {
+async function signValue(env: Env, value: string, request: Request) {
   const key = await crypto.subtle.importKey(
     "raw",
-    new TextEncoder().encode(authSecret(env)),
+    new TextEncoder().encode(authSecret(env, request)),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
@@ -633,8 +633,27 @@ async function signValue(env: Env, value: string) {
   return base64UrlEncodeBytes(new Uint8Array(signature));
 }
 
-function authSecret(env: Env) {
-  return env.ASK_MOLTY_AUTH_SECRET || env.OPENAI_API_KEY || "ask-molty-local-dev";
+function authSecret(env: Env, request: Request) {
+  if (env.ASK_MOLTY_AUTH_SECRET) return env.ASK_MOLTY_AUTH_SECRET;
+  if (isLocalRequest(request)) return env.OPENAI_API_KEY || "ask-molty-local-dev";
+  throw new Error("ASK_MOLTY_AUTH_SECRET missing");
+}
+
+function isLocalRequest(request: Request) {
+  const hostname = new URL(request.url).hostname;
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "[::1]"
+  );
+}
+
+function publicErrorMessage(error: unknown) {
+  if (!(error instanceof Error)) return "Ask Molty failed";
+  const openAiStatus = error.message.match(/^OpenAI error (\d+)/)?.[1];
+  if (openAiStatus) return `OpenAI error ${openAiStatus}`;
+  return error.message.replace(/sk-[A-Za-z0-9_-]+/g, "sk-[redacted]");
 }
 
 function parseCookies(header: string | null) {
@@ -726,11 +745,15 @@ async function authCallback(request: Request, env: Env): Promise<Response> {
   const verified = await verifyClawHubSession(env, token, registry);
   if (!verified.ok) return authErrorPage("GitHub verification failed.", 401);
 
-  const cookie = await createSessionCookie(env, {
-    provider: verified.provider,
-    sub: verified.user.handle ?? verified.user.id,
-    exp: Math.floor(Date.now() / 1000) + authCookieMaxAgeSeconds,
-  });
+  const cookie = await createSessionCookie(
+    env,
+    {
+      provider: verified.provider,
+      sub: verified.user.handle ?? verified.user.id,
+      exp: Math.floor(Date.now() / 1000) + authCookieMaxAgeSeconds,
+    },
+    request,
+  );
   const headers = new Headers({
     Location: returnTo,
     "Cache-Control": "no-store",
