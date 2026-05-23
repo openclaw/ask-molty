@@ -1,9 +1,9 @@
 import type { Env, SearchRecord, WorkspaceFile } from "./types";
 
-const docsCorpusUrl = "https://documentation.openclaw.ai/llms-full.txt";
-const sourceIndexUrl = "https://documentation.openclaw.ai/source-index.jsonl";
-const githubIndexUrl = "https://documentation.openclaw.ai/ask-molty/github-search.jsonl";
-const workspaceManifestUrl = "https://documentation.openclaw.ai/ask-molty/workspace-manifest.json";
+const docsCorpusUrl = "https://docs.openclaw.ai/llms-full.txt";
+const sourceIndexUrl = "https://docs.openclaw.ai/source-index.jsonl";
+const githubIndexUrl = "https://docs.openclaw.ai/ask-molty/github-search.jsonl";
+const workspaceManifestUrl = "https://docs.openclaw.ai/ask-molty/workspace-manifest.json";
 
 export async function buildWorkspace(env: Env, query: string): Promise<WorkspaceFile[]> {
   const [docsCorpus, sourceIndex, githubIndex] = await Promise.all([
@@ -35,7 +35,7 @@ export async function readWorkspaceArtifact(env: Env, workspacePath: string): Pr
   const entry = manifest?.files?.[workspacePath.replace(/^\/+/, "")];
   if (!entry?.url) throw new Error(`workspace file not found: ${workspacePath}`);
   return loadText(
-    new URL(entry.url, manifest?.baseUrl ?? "https://documentation.openclaw.ai/").toString(),
+    new URL(entry.url, manifest?.baseUrl ?? "https://docs.openclaw.ai/").toString(),
     1,
   );
 }

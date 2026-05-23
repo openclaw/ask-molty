@@ -11,10 +11,10 @@ routes = [
 ]
 
 [vars]
-DOCS_CORPUS_URL = "https://documentation.openclaw.ai/llms-full.txt"
-SOURCE_INDEX_URL = "https://documentation.openclaw.ai/source-index.jsonl"
-GITHUB_INDEX_URL = "https://documentation.openclaw.ai/ask-molty/github-search.jsonl"
-WORKSPACE_MANIFEST_URL = "https://documentation.openclaw.ai/ask-molty/workspace-manifest.json"
+DOCS_CORPUS_URL = "https://docs.openclaw.ai/llms-full.txt"
+SOURCE_INDEX_URL = "https://docs.openclaw.ai/source-index.jsonl"
+GITHUB_INDEX_URL = "https://docs.openclaw.ai/ask-molty/github-search.jsonl"
+WORKSPACE_MANIFEST_URL = "https://docs.openclaw.ai/ask-molty/workspace-manifest.json"
 OPENAI_MODEL = "chat-latest"
 CLAWHUB_AUTH_URL = "https://hub.openclaw.ai/docs/auth"
 CLAWHUB_SESSION_VERIFY_URL = "https://clawhub.ai/api/v1/docs/session/verify"

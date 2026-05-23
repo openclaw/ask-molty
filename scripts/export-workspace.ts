@@ -61,9 +61,10 @@ const gitcrawlDb = path.resolve(
   process.env.ASK_MOLTY_GITCRAWL_DB ??
     path.join(gitcrawlStore, "data", "openclaw__openclaw.sync.db"),
 );
-const docsOrigin = (
-  process.env.ASK_MOLTY_DOCS_ORIGIN ?? "https://documentation.openclaw.ai"
-).replace(/\/$/, "");
+const docsOrigin = (process.env.ASK_MOLTY_DOCS_ORIGIN ?? "https://docs.openclaw.ai").replace(
+  /\/$/,
+  "",
+);
 const sourceRepoUrl = (
   process.env.ASK_MOLTY_SOURCE_REPO_URL ?? "https://github.com/openclaw/openclaw"
 ).replace(/\/$/, "");
@@ -178,10 +179,19 @@ function exportSource(): SearchRecord[] {
 
 function exportGithub(): SearchRecord[] {
   if (!fs.existsSync(gitcrawlDb)) return [];
+  const threadColumns = new Set(
+    sqlite<{ name: string }>("pragma table_info(threads)").map((column) => column.name),
+  );
+  const threadBodyExpr = threadColumns.has("body")
+    ? "coalesce(t.body_excerpt, t.body, '')"
+    : "coalesce(t.body_excerpt, '')";
+  const threadBodyLengthExpr = threadColumns.has("body")
+    ? "coalesce(t.body_length, length(coalesce(t.body, '')))"
+    : "coalesce(t.body_length, length(coalesce(t.body_excerpt, '')))";
   const rows = sqlite<SqlRow>(`
 select t.id, t.number, t.kind, t.state, t.title,
-  coalesce(t.body_excerpt, t.body, '') as body,
-  coalesce(t.body_length, length(coalesce(t.body, ''))) as bodyLength,
+  ${threadBodyExpr} as body,
+  ${threadBodyLengthExpr} as bodyLength,
   t.author_login as author, t.html_url as url, t.labels_json as labelsJson,
   t.assignees_json as assigneesJson, t.is_draft as isDraft,
   t.created_at_gh as createdAt, t.updated_at_gh as updatedAt,
