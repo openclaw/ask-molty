@@ -70,7 +70,9 @@ export default {
       headers.set("X-Strategy", "workspace-tools-rag");
       return new Response(answer, { headers });
     } catch (error) {
-      return json(request, { error: publicErrorMessage(error) }, 502);
+      const message = publicErrorMessage(error);
+      console.error("ask-molty chat failed", { error: message });
+      return json(request, { error: message }, 502);
     }
   },
 };
