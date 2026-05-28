@@ -1,6 +1,6 @@
-![Ask Molty banner](docs/assets/readme-banner.jpg)
-
 # Ask Molty
+
+![Ask Molty banner](docs/assets/readme-banner.jpg)
 
 Ask Molty is the OpenClaw documentation agent.
 
