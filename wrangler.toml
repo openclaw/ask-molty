@@ -11,6 +11,7 @@ routes = [
 ]
 
 [vars]
+DOCS_INDEX_URL = "https://docs.openclaw.ai/docs-search.json"
 DOCS_CORPUS_URL = "https://docs.openclaw.ai/llms-full.txt"
 SOURCE_INDEX_URL = "https://docs.openclaw.ai/source-index.jsonl"
 GITHUB_INDEX_URL = "https://docs.openclaw.ai/ask-molty/github-search.jsonl"
