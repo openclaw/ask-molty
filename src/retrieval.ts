@@ -145,10 +145,12 @@ async function loadDocsCorpus(env: Env): Promise<string> {
 }
 
 async function loadDocsRecords(env: Env): Promise<DocsRecordSet> {
+  const indexUrl = env.DOCS_INDEX_URL ?? docsSearchIndexUrl;
   try {
     return {
       records: docsRecordsFromSearchIndex(
-        await loadText(env.DOCS_INDEX_URL ?? docsSearchIndexUrl, 1000, loadTextRetryDelaysMs),
+        await loadText(indexUrl, 1000, loadTextRetryDelaysMs),
+        new URL(indexUrl).origin,
       ),
       usesSearchIndex: true,
     };
@@ -176,19 +178,19 @@ async function loadJson<T>(url: string): Promise<T> {
   return JSON.parse(await loadText(url, 2)) as T;
 }
 
-function docsRecordsFromSearchIndex(text: string): SearchRecord[] {
+function docsRecordsFromSearchIndex(text: string, origin: string): SearchRecord[] {
   const parsed = JSON.parse(text) as Partial<DocsSearchIndex>;
   if (!Array.isArray(parsed.entries)) throw new Error("Invalid docs search index");
   const records = parsed.entries
-    .map((entry) => docsSearchEntryToRecord(entry))
+    .map((entry) => docsSearchEntryToRecord(entry, origin))
     .filter((record): record is SearchRecord => Boolean(record));
   if (!records.length) throw new Error("Docs search index has no usable entries");
   return records;
 }
 
-function docsSearchEntryToRecord(entry: DocsSearchEntry): SearchRecord | undefined {
+function docsSearchEntryToRecord(entry: DocsSearchEntry, origin: string): SearchRecord | undefined {
   if (!entry.url || !entry.search) return undefined;
-  const url = new URL(entry.url, "https://docs.openclaw.ai").toString();
+  const url = new URL(entry.url, origin).toString();
   const title = entry.title || titleFromRoute(entry.url);
   return {
     kind: "docs",

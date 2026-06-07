@@ -92,7 +92,13 @@ async function smokeRuntimeRetrieval(): Promise<void> {
     },
     async () => {
       const files = await buildWorkspace(env, "getting started");
-      if (!files.some((file) => file.path === "/docs/start__getting-started.md")) {
+      if (
+        !files.some(
+          (file) =>
+            file.path === "/docs/start__getting-started.md" &&
+            file.url === "https://example.test/start/getting-started",
+        )
+      ) {
         throw new Error("runtime retrieval: docs-search.json record was not mounted");
       }
     },
