@@ -1,25 +1,44 @@
 import type { Env, SearchRecord, WorkspaceFile } from "./types";
 
 const docsCorpusUrl = "https://docs.openclaw.ai/llms-full.txt";
+const docsCorpusFallbackUrl = "https://docs.openclaw.ai/.well-known/llms-full.txt";
+const docsSearchIndexUrl = "https://docs.openclaw.ai/docs-search.json";
 const sourceIndexUrl = "https://docs.openclaw.ai/source-index.jsonl";
 const githubIndexUrl = "https://docs.openclaw.ai/ask-molty/github-search.jsonl";
 const workspaceManifestUrl = "https://docs.openclaw.ai/ask-molty/workspace-manifest.json";
+const loadTextRetryDelaysMs = [150, 450];
 
 export async function buildWorkspace(env: Env, query: string): Promise<WorkspaceFile[]> {
-  const [docsCorpus, sourceIndex, githubIndex] = await Promise.all([
-    loadText(env.DOCS_CORPUS_URL ?? docsCorpusUrl, 1000),
+  const [docsResult, sourceIndex, githubIndex] = await Promise.all([
+    loadDocsRecords(env).catch(() => ({ records: [], usesSearchIndex: false })),
     loadText(env.SOURCE_INDEX_URL ?? sourceIndexUrl, 1000).catch(() => ""),
     loadText(env.GITHUB_INDEX_URL ?? githubIndexUrl, 1000).catch(() => ""),
   ]);
-  const docs = docsRecordsFromCorpus(docsCorpus);
   const source = recordsFromJsonl(sourceIndex, "source");
   const github = recordsFromJsonl(githubIndex, "github");
 
-  const docMatches = selectRecords(docs, query, 10);
+  let docs = docsResult.records;
+  let docMatches = selectRecords(docs, query, 10);
   const sourceMatches = selectRecords(source, query, sourceSeeking(query) ? 10 : 5);
   const githubMatches = selectRecords(github, query, githubSeeking(query) ? 12 : 4);
+  if (
+    !docMatches.length &&
+    !sourceMatches.length &&
+    !githubMatches.length &&
+    docsResult.usesSearchIndex
+  ) {
+    const corpusDocs = await loadDocsCorpus(env)
+      .then((corpus) => docsRecordsFromCorpus(corpus))
+      .catch(() => []);
+    const corpusMatches = selectRecords(corpusDocs, query, 10);
+    if (corpusMatches.length) {
+      docs = corpusDocs;
+      docMatches = corpusMatches;
+    }
+  }
 
   const files: WorkspaceFile[] = [];
+  if (!docs.length) files.push(docsUnavailableFile());
   const githubSummary = githubSummaryFile(github, query);
   if (githubSummary) files.push(githubSummary);
   for (const record of docMatches) files.push(recordToWorkspaceFile(record));
@@ -80,22 +99,115 @@ export function workspaceContext(files: WorkspaceFile[]): string {
     .join("\n\n---\n\n");
 }
 
-async function loadText(url: string, minLength: number): Promise<string> {
+async function loadText(
+  url: string,
+  minLength: number,
+  retryDelaysMs: readonly number[] = [],
+): Promise<string> {
   const cache = caches.default;
   const key = new Request(url, { method: "GET" });
   const cached = await cache.match(key);
   if (cached?.ok) return cached.text();
-  const response = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 300 } });
-  if (!response.ok) throw new Error(`Unable to load ${url}: ${response.status}`);
-  const text = await response.text();
-  if (text.startsWith("<!DOCTYPE html>") || text.length < minLength)
-    throw new Error(`Invalid text from ${url}`);
-  await cache.put(key, new Response(text, { headers: { "Cache-Control": "public, max-age=300" } }));
-  return text;
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    try {
+      const response = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 300 } });
+      if (!response.ok) throw new Error(`Unable to load ${url}: ${response.status}`);
+      const text = await response.text();
+      if (text.startsWith("<!DOCTYPE html>") || text.length < minLength)
+        throw new Error(`Invalid text from ${url}`);
+      await cache.put(
+        key,
+        new Response(text, { headers: { "Cache-Control": "public, max-age=300" } }),
+      );
+      return text;
+    } catch (error) {
+      lastError = error;
+      const delay = retryDelaysMs[attempt];
+      if (delay) await sleep(delay);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(`Unable to load ${url}`);
+}
+
+async function loadDocsCorpus(env: Env): Promise<string> {
+  for (const url of docsCorpusUrls(env)) {
+    try {
+      return await loadText(url, 1000, loadTextRetryDelaysMs);
+    } catch (error) {
+      console.warn("docs corpus fetch failed", {
+        url,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  throw new Error("Docs corpus is temporarily unavailable. Please retry in a moment.");
+}
+
+async function loadDocsRecords(env: Env): Promise<DocsRecordSet> {
+  const indexUrl = env.DOCS_INDEX_URL ?? docsSearchIndexUrl;
+  try {
+    return {
+      records: docsRecordsFromSearchIndex(
+        await loadText(indexUrl, 1000, loadTextRetryDelaysMs),
+        new URL(indexUrl).origin,
+      ),
+      usesSearchIndex: true,
+    };
+  } catch (error) {
+    console.warn("docs search index fetch failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return {
+    records: docsRecordsFromCorpus(await loadDocsCorpus(env)),
+    usesSearchIndex: false,
+  };
+}
+
+function docsCorpusUrls(env: Env): string[] {
+  const primary = env.DOCS_CORPUS_URL ?? docsCorpusUrl;
+  return primary === docsCorpusUrl ? [docsCorpusUrl, docsCorpusFallbackUrl] : [primary];
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function loadJson<T>(url: string): Promise<T> {
   return JSON.parse(await loadText(url, 2)) as T;
+}
+
+function docsRecordsFromSearchIndex(text: string, origin: string): SearchRecord[] {
+  const parsed = JSON.parse(text) as Partial<DocsSearchIndex>;
+  if (!Array.isArray(parsed.entries)) throw new Error("Invalid docs search index");
+  const records = parsed.entries
+    .map((entry) => docsSearchEntryToRecord(entry, origin))
+    .filter((record): record is SearchRecord => Boolean(record));
+  if (!records.length) throw new Error("Docs search index has no usable entries");
+  return records;
+}
+
+function docsSearchEntryToRecord(entry: DocsSearchEntry, origin: string): SearchRecord | undefined {
+  if (!entry.url || !entry.search) return undefined;
+  const url = new URL(entry.url, origin).toString();
+  const title = entry.title || titleFromRoute(entry.url);
+  return {
+    kind: "docs",
+    path: `/docs/${flatPath(entry.url.replace(/^\/+/, "") || "index")}.md`,
+    title,
+    url,
+    search: [title, entry.snippet, entry.search].filter(Boolean).join("\n\n"),
+  };
+}
+
+function titleFromRoute(value: string): string {
+  const base = value.replace(/\/$/u, "").split("/").pop() || "Docs";
+  return base
+    .split(/[-_]+/u)
+    .filter(Boolean)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(" ");
 }
 
 function docsRecordsFromCorpus(corpus: string): SearchRecord[] {
@@ -114,6 +226,15 @@ function docsRecordsFromCorpus(corpus: string): SearchRecord[] {
         search: chunk,
       };
     });
+}
+
+function docsUnavailableFile(): WorkspaceFile {
+  return {
+    path: "/workspace/docs/unavailable.md",
+    kind: "docs",
+    content:
+      "# Docs unavailable\n\nThe OpenClaw docs index could not be loaded for this answer. If the question needs documentation context, tell the user Molty cannot load the docs right now and ask them to retry in a moment. Do not invent documentation details.",
+  };
 }
 
 function recordsFromJsonl(text: string, kind: SearchRecord["kind"]): SearchRecord[] {
@@ -438,4 +559,20 @@ function languageForPath(path: string): string {
 interface WorkspaceManifest {
   baseUrl?: string;
   files?: Record<string, { url: string; bytes?: number; sha256?: string; kind?: string }>;
+}
+
+interface DocsRecordSet {
+  records: SearchRecord[];
+  usesSearchIndex: boolean;
+}
+
+interface DocsSearchIndex {
+  entries?: DocsSearchEntry[];
+}
+
+interface DocsSearchEntry {
+  search?: string;
+  snippet?: string;
+  title?: string;
+  url?: string;
 }

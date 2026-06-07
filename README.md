@@ -71,7 +71,7 @@ The Worker expects `OPENAI_API_KEY` as a Cloudflare Worker secret. The default m
 Docs chat auth is brokered through ClawHub:
 
 - `CLAWHUB_AUTH_URL` sends users to `https://hub.openclaw.ai/docs/auth`.
-- Corpus and workspace URLs default to `https://docs.openclaw.ai`; the legacy
+- Docs index, corpus, and workspace URLs default to `https://docs.openclaw.ai`; the legacy
   documentation host remains routed only for compatibility.
 - `CLAWHUB_SESSION_VERIFY_URL` verifies the ClawHub Convex Auth token once.
 - `ASK_MOLTY_AUTH_SECRET` signs the docs-only session cookie; set it in production so OpenAI key rotation does not invalidate sessions.
