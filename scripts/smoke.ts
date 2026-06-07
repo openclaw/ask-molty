@@ -100,6 +100,7 @@ async function smokeRuntimeRetrieval(): Promise<void> {
   if (firstCalls.includes(docsCorpusUrl)) {
     throw new Error("runtime retrieval: docs corpus loaded despite a usable docs index");
   }
+  console.log("runtime retrieval ok: docs-search.json mounted without corpus fetch");
 
   await withMockNetwork(
     async (url) => {
@@ -115,6 +116,7 @@ async function smokeRuntimeRetrieval(): Promise<void> {
       }
     },
   );
+  console.log("runtime retrieval ok: docs corpus fallback mounted after index failure");
 
   await withMockNetwork(
     async (url) => {
@@ -135,6 +137,7 @@ async function smokeRuntimeRetrieval(): Promise<void> {
       }
     },
   );
+  console.log("runtime retrieval ok: docs outage keeps source and GitHub context");
 }
 
 async function withMockNetwork(
