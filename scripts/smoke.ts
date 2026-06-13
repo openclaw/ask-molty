@@ -3,6 +3,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { normalizeDocsReturnTo } from "../src/auth";
 import { buildWorkspace } from "../src/retrieval";
 import type { Env } from "../src/types";
 
@@ -33,9 +34,28 @@ const github = fs.readFileSync(path.join(outDir, "github-search.jsonl"), "utf8")
 if (!github.includes("github.com/openclaw/openclaw"))
   throw new Error("github index missing OpenClaw links");
 
+smokeAuthRouting();
 await smokeRuntimeRetrieval();
 
 console.log(`ask-molty smoke ok: ${fileCount} workspace files`);
+
+function smokeAuthRouting(): void {
+  const canonical = normalizeDocsReturnTo("https://clawhub.ai/docs/plugins");
+  if (canonical !== "https://clawhub.ai/docs/plugins") {
+    throw new Error(`auth routing: canonical docs return changed to ${canonical}`);
+  }
+
+  const legacy = normalizeDocsReturnTo("https://hub.openclaw.ai/docs/plugins?tab=publish");
+  if (legacy !== "https://clawhub.ai/docs/plugins?tab=publish") {
+    throw new Error(`auth routing: legacy docs return did not canonicalize: ${legacy}`);
+  }
+
+  if (normalizeDocsReturnTo("https://example.com/docs") !== null) {
+    throw new Error("auth routing: unrelated docs origin was accepted");
+  }
+
+  console.log("auth routing ok: ClawHub docs origins accepted and canonicalized");
+}
 
 async function smokeRuntimeRetrieval(): Promise<void> {
   const docsIndexUrl = "https://example.test/docs-search.json";

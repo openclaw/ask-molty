@@ -1,3 +1,4 @@
+import { allowedOrigins, normalizeDocsReturnTo } from "./auth";
 import { buildWorkspace, readWorkspace, searchWorkspace, workspaceContext } from "./retrieval";
 import { systemPrompt } from "./prompt";
 import type {
@@ -8,15 +9,6 @@ import type {
   WorkspaceFile,
 } from "./types";
 
-const allowedOrigins = new Set([
-  "https://documentation.openclaw.ai",
-  "http://documentation.openclaw.ai",
-  "https://docs.openclaw.ai",
-  "http://docs.openclaw.ai",
-  "https://openclaw.github.io",
-  "http://localhost:4173",
-  "http://127.0.0.1:4173",
-]);
 const maxMessageLength = 2000;
 const maxToolRounds = 4;
 const maxShellOutput = 16_000;
@@ -725,8 +717,8 @@ async function sessionResponse(request: Request, env: Env): Promise<Response> {
 }
 
 function signInPage(request: Request, env: Env): Response {
-  const returnTo = safeDocsReturnTo(request) ?? new URL("/", request.url).href;
-  const authUrl = new URL(env.CLAWHUB_AUTH_URL ?? "https://hub.openclaw.ai/docs/auth");
+  const returnTo = safeDocsReturnTo(request) ?? "https://clawhub.ai/docs";
+  const authUrl = new URL(env.CLAWHUB_AUTH_URL ?? "https://clawhub.ai/auth/docs");
   authUrl.searchParams.set("return_to", returnTo);
   return Response.redirect(authUrl.href, 302);
 }
@@ -781,18 +773,6 @@ function safeDocsReturnTo(request: Request): string | null {
   const url = new URL(request.url);
   const value = url.searchParams.get("return_to");
   return normalizeDocsReturnTo(value);
-}
-
-function normalizeDocsReturnTo(value: string | null): string | null {
-  if (!value) return null;
-  try {
-    const target = new URL(value);
-    if (!allowedOrigins.has(target.origin)) return null;
-    if (!["http:", "https:"].includes(target.protocol)) return null;
-    return target.href;
-  } catch {
-    return null;
-  }
 }
 
 function stringFormValue(value: unknown): string | null {
