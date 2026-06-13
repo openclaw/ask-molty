@@ -1,5 +1,6 @@
 export interface Env {
   OPENAI_API_KEY: string;
+  DOCS_ARTIFACTS?: R2Bucket;
   DOCS_INDEX_URL?: string;
   DOCS_CORPUS_URL?: string;
   SOURCE_INDEX_URL?: string;

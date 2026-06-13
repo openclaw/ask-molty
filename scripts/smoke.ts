@@ -50,6 +50,11 @@ function smokeAuthRouting(): void {
     throw new Error(`auth routing: legacy docs return did not canonicalize: ${legacy}`);
   }
 
+  const docsSite = normalizeDocsReturnTo("https://docs.openclaw.ai/install");
+  if (docsSite !== "https://docs.openclaw.ai/install") {
+    throw new Error(`auth routing: docs site return changed to ${docsSite}`);
+  }
+
   if (normalizeDocsReturnTo("https://example.com/docs") !== null) {
     throw new Error("auth routing: unrelated docs origin was accepted");
   }
@@ -103,6 +108,37 @@ async function smokeRuntimeRetrieval(): Promise<void> {
   ].join("\n");
 
   const firstCalls: string[] = [];
+  const storedCalls: string[] = [];
+  await withMockNetwork(
+    async (url) => {
+      storedCalls.push(url);
+      if (url === githubIndexUrl) return new Response(githubIndex);
+      return new Response("missing", { status: 522 });
+    },
+    async () => {
+      const files = await buildWorkspace(
+        {
+          ...env,
+          DOCS_ARTIFACTS: fakeR2({
+            "docs-search.json": docsIndex,
+            "source-index.jsonl": sourceIndex,
+          }),
+        },
+        "getting started settings implementation issue",
+      );
+      if (!files.some((file) => file.path === "/docs/start__getting-started.md")) {
+        throw new Error("runtime retrieval: R2 docs index was not mounted");
+      }
+      if (!files.some((file) => file.kind === "source")) {
+        throw new Error("runtime retrieval: R2 source index was not mounted");
+      }
+    },
+  );
+  if (storedCalls.includes(docsIndexUrl) || storedCalls.includes(sourceIndexUrl)) {
+    throw new Error("runtime retrieval: public docs host used despite usable R2 artifacts");
+  }
+  console.log("runtime retrieval ok: R2 survives public docs host outage");
+
   await withMockNetwork(
     async (url) => {
       firstCalls.push(url);
@@ -164,6 +200,21 @@ async function smokeRuntimeRetrieval(): Promise<void> {
     },
   );
   console.log("runtime retrieval ok: docs outage keeps source and GitHub context");
+}
+
+function fakeR2(objects: Record<string, string>): R2Bucket {
+  return {
+    get: async (key: string) => {
+      const value = objects[key];
+      return value === undefined
+        ? null
+        : {
+            body: new Response(value).body,
+            size: new TextEncoder().encode(value).byteLength,
+            text: async () => value,
+          };
+    },
+  } as unknown as R2Bucket;
 }
 
 async function withMockNetwork(

@@ -14,8 +14,12 @@ routes = [
 DOCS_INDEX_URL = "https://docs.openclaw.ai/docs-search.json"
 DOCS_CORPUS_URL = "https://docs.openclaw.ai/llms-full.txt"
 SOURCE_INDEX_URL = "https://docs.openclaw.ai/source-index.jsonl"
-GITHUB_INDEX_URL = "https://docs.openclaw.ai/ask-molty/github-search.jsonl"
+GITHUB_INDEX_URL = "https://github.com/openclaw/ask-molty/releases/download/workspace-latest/github-search.jsonl"
 WORKSPACE_MANIFEST_URL = "https://docs.openclaw.ai/ask-molty/workspace-manifest.json"
 OPENAI_MODEL = "chat-latest"
 CLAWHUB_AUTH_URL = "https://clawhub.ai/auth/docs"
 CLAWHUB_SESSION_VERIFY_URL = "https://clawhub.ai/api/v1/docs/session/verify"
+
+[[r2_buckets]]
+binding = "DOCS_ARTIFACTS"
+bucket_name = "openclaw-docs"

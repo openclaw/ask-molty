@@ -4,23 +4,44 @@ const docsCorpusUrl = "https://docs.openclaw.ai/llms-full.txt";
 const docsCorpusFallbackUrl = "https://docs.openclaw.ai/.well-known/llms-full.txt";
 const docsSearchIndexUrl = "https://docs.openclaw.ai/docs-search.json";
 const sourceIndexUrl = "https://docs.openclaw.ai/source-index.jsonl";
-const githubIndexUrl = "https://docs.openclaw.ai/ask-molty/github-search.jsonl";
+const githubIndexUrl =
+  "https://github.com/openclaw/ask-molty/releases/download/workspace-latest/github-search.jsonl";
 const workspaceManifestUrl = "https://docs.openclaw.ai/ask-molty/workspace-manifest.json";
 const loadTextRetryDelaysMs = [150, 450];
 
+interface RecordSelection {
+  matches: SearchRecord[];
+  summaryRecords: SearchRecord[];
+  parsedRecords: number;
+}
+
 export async function buildWorkspace(env: Env, query: string): Promise<WorkspaceFile[]> {
-  const [docsResult, sourceIndex, githubIndex] = await Promise.all([
+  const sourceLimit = sourceSeeking(query) ? 10 : 5;
+  const githubLimit = githubSeeking(query) ? 12 : 4;
+  const [docsResult, sourceSelection, githubSelection] = await Promise.all([
     loadDocsRecords(env).catch(() => ({ records: [], usesSearchIndex: false })),
-    loadText(env.SOURCE_INDEX_URL ?? sourceIndexUrl, 1000).catch(() => ""),
-    loadText(env.GITHUB_INDEX_URL ?? githubIndexUrl, 1000).catch(() => ""),
+    loadSearchSelection(
+      env,
+      "source-index.jsonl",
+      env.SOURCE_INDEX_URL ?? sourceIndexUrl,
+      "source",
+      query,
+      sourceLimit,
+    ),
+    loadSearchSelection(
+      env,
+      null,
+      env.GITHUB_INDEX_URL ?? githubIndexUrl,
+      "github",
+      query,
+      githubLimit,
+    ),
   ]);
-  const source = recordsFromJsonl(sourceIndex, "source");
-  const github = recordsFromJsonl(githubIndex, "github");
 
   let docs = docsResult.records;
   let docMatches = selectRecords(docs, query, 10);
-  const sourceMatches = selectRecords(source, query, sourceSeeking(query) ? 10 : 5);
-  const githubMatches = selectRecords(github, query, githubSeeking(query) ? 12 : 4);
+  const sourceMatches = sourceSelection.matches;
+  const githubMatches = githubSelection.matches;
   if (
     !docMatches.length &&
     !sourceMatches.length &&
@@ -39,7 +60,7 @@ export async function buildWorkspace(env: Env, query: string): Promise<Workspace
 
   const files: WorkspaceFile[] = [];
   if (!docs.length) files.push(docsUnavailableFile());
-  const githubSummary = githubSummaryFile(github, query);
+  const githubSummary = githubSummaryFile(githubSelection.summaryRecords, query);
   if (githubSummary) files.push(githubSummary);
   for (const record of docMatches) files.push(recordToWorkspaceFile(record));
   for (const record of sourceMatches) files.push(await sourceToWorkspaceFile(record));
@@ -131,7 +152,9 @@ async function loadText(
 }
 
 async function loadDocsCorpus(env: Env): Promise<string> {
-  for (const url of docsCorpusUrls(env)) {
+  const stored = await loadR2Text(env, "llms-full.txt", 1000);
+  if (stored) return stored;
+  for (const url of uniqueUrls(env.DOCS_CORPUS_URL, docsCorpusUrl, docsCorpusFallbackUrl)) {
     try {
       return await loadText(url, 1000, loadTextRetryDelaysMs);
     } catch (error) {
@@ -145,19 +168,35 @@ async function loadDocsCorpus(env: Env): Promise<string> {
 }
 
 async function loadDocsRecords(env: Env): Promise<DocsRecordSet> {
-  const indexUrl = env.DOCS_INDEX_URL ?? docsSearchIndexUrl;
-  try {
-    return {
-      records: docsRecordsFromSearchIndex(
-        await loadText(indexUrl, 1000, loadTextRetryDelaysMs),
-        new URL(indexUrl).origin,
-      ),
-      usesSearchIndex: true,
-    };
-  } catch (error) {
-    console.warn("docs search index fetch failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
+  const stored = await loadR2Text(env, "docs-search.json", 1000);
+  if (stored) {
+    try {
+      return {
+        records: docsRecordsFromSearchIndex(stored, "https://docs.openclaw.ai"),
+        usesSearchIndex: true,
+      };
+    } catch (error) {
+      console.warn("stored docs search index invalid", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  for (const indexUrl of uniqueUrls(env.DOCS_INDEX_URL, docsSearchIndexUrl)) {
+    try {
+      return {
+        records: docsRecordsFromSearchIndex(
+          await loadText(indexUrl, 1000, loadTextRetryDelaysMs),
+          new URL(indexUrl).origin,
+        ),
+        usesSearchIndex: true,
+      };
+    } catch (error) {
+      console.warn("docs search index fetch failed", {
+        url: indexUrl,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
   return {
     records: docsRecordsFromCorpus(await loadDocsCorpus(env)),
@@ -165,9 +204,65 @@ async function loadDocsRecords(env: Env): Promise<DocsRecordSet> {
   };
 }
 
-function docsCorpusUrls(env: Env): string[] {
-  const primary = env.DOCS_CORPUS_URL ?? docsCorpusUrl;
-  return primary === docsCorpusUrl ? [docsCorpusUrl, docsCorpusFallbackUrl] : [primary];
+async function loadSearchSelection(
+  env: Env,
+  objectKey: string | null,
+  url: string,
+  kind: SearchRecord["kind"],
+  query: string,
+  limit: number,
+): Promise<RecordSelection> {
+  if (objectKey && env.DOCS_ARTIFACTS) {
+    try {
+      const object = await env.DOCS_ARTIFACTS.get(objectKey);
+      if (object && object.size >= 1000) {
+        const selection = await selectJsonlStream(object.body, kind, query, limit);
+        if (selection.parsedRecords > 0) return selection;
+        console.warn("stored search index has no usable records", { objectKey });
+      }
+    } catch (error) {
+      console.warn("stored search index failed", {
+        objectKey,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  try {
+    const response = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 300 } });
+    if (!response.ok || !response.body)
+      throw new Error(`Unable to load ${url}: ${response.status}`);
+    const selection = await selectJsonlStream(response.body, kind, query, limit);
+    if (selection.parsedRecords > 0) return selection;
+    console.warn("search index has no usable records", { url });
+  } catch (error) {
+    console.warn("search index fetch failed", {
+      url,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return { matches: [], summaryRecords: [], parsedRecords: 0 };
+}
+
+async function loadR2Text(env: Env, key: string, minLength: number): Promise<string | null> {
+  if (!env.DOCS_ARTIFACTS) return null;
+  try {
+    const object = await env.DOCS_ARTIFACTS.get(key);
+    if (!object) return null;
+    const text = await object.text();
+    if (text.startsWith("<!DOCTYPE html>") || text.length < minLength) return null;
+    return text;
+  } catch (error) {
+    console.warn("stored retrieval artifact failed", {
+      key,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+function uniqueUrls(...urls: Array<string | undefined>): string[] {
+  return [...new Set(urls.filter((url): url is string => Boolean(url)))];
 }
 
 function sleep(ms: number): Promise<void> {
@@ -237,42 +332,91 @@ function docsUnavailableFile(): WorkspaceFile {
   };
 }
 
-function recordsFromJsonl(text: string, kind: SearchRecord["kind"]): SearchRecord[] {
-  const records: SearchRecord[] = [];
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const parsed = JSON.parse(line) as Partial<SearchRecord>;
-      if (parsed.path && parsed.search)
-        records.push({ ...parsed, kind, path: parsed.path, search: parsed.search });
-    } catch {
-      // Ignore one malformed row.
+async function selectJsonlStream(
+  stream: ReadableStream<Uint8Array>,
+  kind: SearchRecord["kind"],
+  query: string,
+  limit: number,
+): Promise<RecordSelection> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  const terms = tokenize(query);
+  const ranked: Array<{ record: SearchRecord; score: number }> = [];
+  const summaryRecords: SearchRecord[] = [];
+  let parsedRecords = 0;
+  let buffer = "";
+
+  const processLine = (line: string) => {
+    const record = parseJsonlRecord(line, kind);
+    if (!record) return;
+    parsedRecords += 1;
+    if (
+      kind === "github" &&
+      wantsOpenPullRequestList(query) &&
+      record.state === "open" &&
+      githubRecordType(record) === "pull request"
+    ) {
+      summaryRecords.push(record);
     }
+    const score = recordScore(record, terms);
+    if (score <= 0) return;
+    ranked.push({ record, score });
+    if (ranked.length > limit * 4) {
+      ranked.sort((a, b) => b.score - a.score);
+      ranked.length = limit;
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) processLine(line);
   }
-  return records;
+  buffer += decoder.decode();
+  if (buffer.trim()) processLine(buffer);
+
+  ranked.sort((a, b) => b.score - a.score);
+  return {
+    matches: ranked.slice(0, limit).map((item) => item.record),
+    summaryRecords,
+    parsedRecords,
+  };
+}
+
+function parseJsonlRecord(line: string, kind: SearchRecord["kind"]): SearchRecord | null {
+  if (!line.trim()) return null;
+  try {
+    const parsed = JSON.parse(line) as Partial<SearchRecord>;
+    if (!parsed.path || !parsed.search) return null;
+    return { ...parsed, kind, path: parsed.path, search: parsed.search };
+  } catch {
+    return null;
+  }
 }
 
 function selectRecords(records: SearchRecord[], query: string, limit: number): SearchRecord[] {
   const terms = tokenize(query);
   return records
-    .map((record) => {
-      const pathText = `${record.title ?? ""}\n${record.path}\n${record.url ?? ""}`.toLowerCase();
-      const searchText = record.search.toLowerCase();
-      const exactBonus = terms.reduce((score, term) => {
-        const filenameBonus = term.includes("-") ? 1000 : 100;
-        if (pathText.includes(term)) return score + filenameBonus + term.length;
-        if (term.includes("-") && searchText.includes(term)) return score + 400 + term.length;
-        return score;
-      }, 0);
-      return {
-        record,
-        score: exactBonus + scoreText(recordSearchText(record), terms),
-      };
-    })
+    .map((record) => ({ record, score: recordScore(record, terms) }))
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map((item) => item.record);
+}
+
+function recordScore(record: SearchRecord, terms: string[]): number {
+  const pathText = `${record.title ?? ""}\n${record.path}\n${record.url ?? ""}`.toLowerCase();
+  const searchText = record.search.toLowerCase();
+  const exactBonus = terms.reduce((score, term) => {
+    const filenameBonus = term.includes("-") ? 1000 : 100;
+    if (pathText.includes(term)) return score + filenameBonus + term.length;
+    if (term.includes("-") && searchText.includes(term)) return score + 400 + term.length;
+    return score;
+  }, 0);
+  return exactBonus + scoreText(recordSearchText(record), terms);
 }
 
 function githubToWorkspaceFile(record: SearchRecord): WorkspaceFile {
