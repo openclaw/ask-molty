@@ -1,9 +1,9 @@
-const canonicalDocsOrigin = "https://clawhub.ai";
-const docsOriginAliases = new Map([["https://hub.openclaw.ai", canonicalDocsOrigin]]);
+const canonicalDocsOrigin = "https://docs.clawhub.ai";
+const legacyClawHubOrigins = new Set(["https://clawhub.ai", "https://hub.openclaw.ai"]);
 
 export const allowedOrigins = new Set([
   canonicalDocsOrigin,
-  ...docsOriginAliases.keys(),
+  ...legacyClawHubOrigins,
   "https://documentation.openclaw.ai",
   "http://documentation.openclaw.ai",
   "https://docs.openclaw.ai",
@@ -19,11 +19,12 @@ export function normalizeDocsReturnTo(value: string | null): string | null {
     const target = new URL(value);
     if (!allowedOrigins.has(target.origin)) return null;
     if (!["http:", "https:"].includes(target.protocol)) return null;
-    const canonicalOrigin = docsOriginAliases.get(target.origin);
-    if (canonicalOrigin) {
-      const canonical = new URL(canonicalOrigin);
+    if (legacyClawHubOrigins.has(target.origin)) {
+      if (target.pathname !== "/docs" && !target.pathname.startsWith("/docs/")) return null;
+      const canonical = new URL(canonicalDocsOrigin);
       target.protocol = canonical.protocol;
       target.host = canonical.host;
+      target.pathname = target.pathname.slice("/docs".length) || "/";
     }
     return target.href;
   } catch {

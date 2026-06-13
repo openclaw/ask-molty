@@ -40,13 +40,13 @@ await smokeRuntimeRetrieval();
 console.log(`ask-molty smoke ok: ${fileCount} workspace files`);
 
 function smokeAuthRouting(): void {
-  const canonical = normalizeDocsReturnTo("https://clawhub.ai/docs/plugins");
-  if (canonical !== "https://clawhub.ai/docs/plugins") {
+  const canonical = normalizeDocsReturnTo("https://docs.clawhub.ai/plugins");
+  if (canonical !== "https://docs.clawhub.ai/plugins") {
     throw new Error(`auth routing: canonical docs return changed to ${canonical}`);
   }
 
   const legacy = normalizeDocsReturnTo("https://hub.openclaw.ai/docs/plugins?tab=publish");
-  if (legacy !== "https://clawhub.ai/docs/plugins?tab=publish") {
+  if (legacy !== "https://docs.clawhub.ai/plugins?tab=publish") {
     throw new Error(`auth routing: legacy docs return did not canonicalize: ${legacy}`);
   }
 

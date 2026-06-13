@@ -717,7 +717,7 @@ async function sessionResponse(request: Request, env: Env): Promise<Response> {
 }
 
 function signInPage(request: Request, env: Env): Response {
-  const returnTo = safeDocsReturnTo(request) ?? "https://clawhub.ai/docs";
+  const returnTo = safeDocsReturnTo(request) ?? "https://docs.clawhub.ai";
   const authUrl = new URL(env.CLAWHUB_AUTH_URL ?? "https://clawhub.ai/auth/docs");
   authUrl.searchParams.set("return_to", returnTo);
   return Response.redirect(authUrl.href, 302);
