@@ -17,12 +17,12 @@
     "typecheck": "tsgo -p tsconfig.worker.json --noEmit && tsgo -p tsconfig.scripts.json --noEmit"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "4.20260506.1",
+    "@cloudflare/workers-types": "^4.20260629.1",
     "@types/node": "24.10.1",
     "@typescript/native-preview": "7.0.0-dev.20260505.1",
     "oxfmt": "0.48.0",
     "oxlint": "1.63.0",
     "tsx": "4.21.0",
-    "wrangler": "4.87.0"
+    "wrangler": "^4.105.0"
   }
 }
