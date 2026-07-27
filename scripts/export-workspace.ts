@@ -543,7 +543,10 @@ function gitDirExists(dir: string): boolean {
 }
 
 function git(dir: string, args: string[]): string {
-  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim();
+  return execFileSync("git", ["-C", dir, ...args], {
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+  }).trim();
 }
 
 function safeStat(file: string): fs.Stats | null {
