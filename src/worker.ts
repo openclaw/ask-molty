@@ -25,8 +25,8 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders(request) });
     const pathname = new URL(request.url).pathname;
     if (pathname in artifactUrls) return serveArtifact(request, artifactUrls[pathname] ?? "");
-    if (pathname === "/ask-molty/auth/callback" && request.method === "POST")
-      return authCallback(request, env);
+    if (pathname === "/ask-molty/auth/oidc-callback" && request.method === "GET")
+      return oidcCallback(request, env);
     if (isChatPath(pathname) && ["GET", "HEAD"].includes(request.method))
       return sessionResponse(request, env);
     if (pathname === "/ask-molty/api/session" && ["GET", "HEAD"].includes(request.method))
@@ -37,7 +37,11 @@ export default {
       return new Response("Not found", { status: 404 });
     if (!isAllowedChatOrigin(request)) return json(request, { error: "origin not allowed" }, 403);
     if (!(await hasValidSession(request, env)))
-      return json(request, { authenticated: false, error: "GitHub verification required" }, 401);
+      return json(
+        request,
+        { authenticated: false, error: "OpenClaw ID verification required" },
+        401,
+      );
     if (!env.OPENAI_API_KEY) return json(request, { error: "OPENAI_API_KEY missing" }, 500);
 
     let message = "";
@@ -520,75 +524,22 @@ function json(request: Request, data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers });
 }
 
-type VerifiedClawHubSession =
-  | {
-      ok: true;
-      provider: "github";
-      user: { id: string; handle: string | null };
-    }
-  | { ok: false };
-
-async function verifyClawHubSession(
-  env: Env,
-  token: string,
-  registry: string | null,
-): Promise<VerifiedClawHubSession> {
-  const verifyUrl = new URL(
-    env.CLAWHUB_SESSION_VERIFY_URL ?? "https://clawhub.ai/api/v1/docs/session/verify",
-  );
-  if (registry && isAllowedClawHubRegistry(registry)) {
-    verifyUrl.protocol = new URL(registry).protocol;
-    verifyUrl.host = new URL(registry).host;
-  }
-  const response = await fetch(verifyUrl.href, {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-  });
-  if (!response.ok) return { ok: false };
-  const body = (await response.json()) as {
-    provider?: unknown;
-    user?: { id?: unknown; handle?: unknown };
-  };
-  const id = typeof body.user?.id === "string" ? body.user.id : "";
-  if (!id || body.provider !== "github") return { ok: false };
-  return {
-    ok: true,
-    provider: "github",
-    user: {
-      id,
-      handle: typeof body.user?.handle === "string" ? body.user.handle : null,
-    },
-  };
-}
-
-function isAllowedClawHubRegistry(value: string) {
-  try {
-    const url = new URL(value);
-    return (
-      url.origin === "https://clawhub.ai" ||
-      url.origin === "https://hub.openclaw.ai" ||
-      url.origin === "http://localhost:3000" ||
-      url.origin === "http://127.0.0.1:3000"
-    );
-  } catch {
-    return false;
-  }
-}
-
 type SessionPayload = {
-  provider: "github";
+  provider: "github" | "openclaw-id";
   sub: string;
   exp: number;
 };
 
 async function hasValidSession(request: Request, env: Env) {
+  return Boolean(await sessionPayload(request, env));
+}
+
+async function sessionPayload(request: Request, env: Env): Promise<SessionPayload | null> {
   const cookie = parseCookies(request.headers.get("Cookie")).get(authCookieName);
-  if (!cookie) return false;
+  if (!cookie) return null;
   const payload = await verifySessionCookie(env, cookie, request);
-  return Boolean(payload && payload.exp > Math.floor(Date.now() / 1000));
+  if (!payload || payload.exp <= Math.floor(Date.now() / 1000)) return null;
+  return payload;
 }
 
 async function createSessionCookie(env: Env, payload: SessionPayload, request: Request) {
@@ -608,7 +559,8 @@ async function verifySessionCookie(
   if (!constantTimeEqual(signature, expected)) return null;
   try {
     const parsed = JSON.parse(base64UrlDecode(payload)) as Partial<SessionPayload>;
-    if (parsed.provider !== "github" || !parsed.sub || typeof parsed.exp !== "number") return null;
+    if (parsed.provider !== "github" && parsed.provider !== "openclaw-id") return null;
+    if (!parsed.sub || typeof parsed.exp !== "number") return null;
     return parsed as SessionPayload;
   } catch {
     return null;
@@ -704,46 +656,91 @@ async function sessionResponse(request: Request, env: Env): Promise<Response> {
   headers.set("Content-Type", "application/json");
   headers.set("Cache-Control", "no-store");
   headers.set("X-Content-Type-Options", "nosniff");
-  const authenticated = await hasValidSession(request, env);
+  const payload = await sessionPayload(request, env);
+  const authenticated = Boolean(payload);
   const status = authenticated ? 200 : 401;
   if (request.method === "HEAD") return new Response(null, { status, headers });
-  return new Response(
-    JSON.stringify({ authenticated, provider: authenticated ? "github" : null }),
-    {
-      status,
-      headers,
-    },
-  );
+  return new Response(JSON.stringify({ authenticated, provider: payload?.provider ?? null }), {
+    status,
+    headers,
+  });
 }
 
-function signInPage(request: Request, env: Env): Response {
+async function signInPage(request: Request, env: Env): Promise<Response> {
   const returnTo = safeDocsReturnTo(request) ?? "https://docs.clawhub.ai";
-  const authUrl = new URL(env.CLAWHUB_AUTH_URL ?? "https://clawhub.ai/auth/docs");
-  authUrl.searchParams.set("return_to", returnTo);
+  if (!env.OPENCLAW_ID_CLIENT_ID) return authErrorPage("Sign-in is not configured.", 500);
+  const statePayload = base64UrlEncode(
+    JSON.stringify({ r: returnTo, exp: Math.floor(Date.now() / 1000) + 600 }),
+  );
+  const state = `${statePayload}.${await signValue(env, statePayload, request)}`;
+  const authUrl = new URL(`${oidcIssuer(env)}/oauth2/authorize`);
+  authUrl.searchParams.set("client_id", env.OPENCLAW_ID_CLIENT_ID);
+  authUrl.searchParams.set("redirect_uri", oidcRedirectUri(request));
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("scope", "openid profile email");
+  authUrl.searchParams.set("state", state);
   return Response.redirect(authUrl.href, 302);
 }
 
-async function authCallback(request: Request, env: Env): Promise<Response> {
-  let form: FormData;
+function oidcIssuer(env: Env) {
+  return env.OPENCLAW_ID_ISSUER ?? "https://id.openclaw.ai/api/auth";
+}
+
+// The session cookie is host-scoped, so each docs host has its own registered
+// callback; authorize and token exchange must use the same redirect_uri.
+function oidcRedirectUri(request: Request) {
+  const origin = new URL(request.url).origin;
+  const host = allowedOrigins.has(origin) ? origin : "https://docs.openclaw.ai";
+  return `${host}/ask-molty/auth/oidc-callback`;
+}
+
+async function oidcCallback(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state") ?? "";
+  const [statePayload, stateSignature, extra] = state.split(".");
+  if (!code || !statePayload || !stateSignature || extra)
+    return authErrorPage("Invalid sign-in response.", 400);
+  if (!constantTimeEqual(stateSignature, await signValue(env, statePayload, request)))
+    return authErrorPage("Invalid sign-in state.", 400);
+  let returnTo: string | null = null;
   try {
-    form = await request.formData();
+    const parsed = JSON.parse(base64UrlDecode(statePayload)) as { r?: string; exp?: number };
+    if (typeof parsed.exp !== "number" || parsed.exp < Math.floor(Date.now() / 1000))
+      return authErrorPage("Sign-in expired. Please try again.", 400);
+    returnTo = normalizeDocsReturnTo(parsed.r ?? null);
   } catch {
-    return authErrorPage("Invalid verification response.", 400);
+    return authErrorPage("Invalid sign-in state.", 400);
   }
-
-  const token = stringFormValue(form.get("token"));
-  const returnTo = normalizeDocsReturnTo(stringFormValue(form.get("return_to")));
-  const registry = stringFormValue(form.get("registry"));
-  if (!token || !returnTo) return authErrorPage("Invalid verification response.", 400);
-
-  const verified = await verifyClawHubSession(env, token, registry);
-  if (!verified.ok) return authErrorPage("GitHub verification failed.", 401);
-
+  if (!returnTo) return authErrorPage("Invalid sign-in response.", 400);
+  if (!env.OPENCLAW_ID_CLIENT_ID || !env.OPENCLAW_ID_CLIENT_SECRET)
+    return authErrorPage("Sign-in is not configured.", 500);
+  const tokenResponse = await fetch(`${oidcIssuer(env)}/oauth2/token`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Authorization: `Basic ${btoa(`${env.OPENCLAW_ID_CLIENT_ID}:${env.OPENCLAW_ID_CLIENT_SECRET}`)}`,
+    },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: oidcRedirectUri(request),
+    }),
+  });
+  if (!tokenResponse.ok) return authErrorPage("OpenClaw ID verification failed.", 401);
+  const tokens = await tokenResponse.json<{ id_token?: string }>();
+  // The id_token arrives directly from the issuer over TLS on an
+  // authenticated confidential-client exchange, so decoding without local
+  // signature verification is sufficient here.
+  const claims = decodeJwtClaims(tokens.id_token ?? "");
+  const email = typeof claims?.email === "string" ? claims.email : "";
+  const subject = email || (typeof claims?.sub === "string" ? claims.sub : "");
+  if (!subject) return authErrorPage("OpenClaw ID verification failed.", 401);
   const cookie = await createSessionCookie(
     env,
     {
-      provider: verified.provider,
-      sub: verified.user.handle ?? verified.user.id,
+      provider: "openclaw-id",
+      sub: subject,
       exp: Math.floor(Date.now() / 1000) + authCookieMaxAgeSeconds,
     },
     request,
@@ -754,6 +751,17 @@ async function authCallback(request: Request, env: Env): Promise<Response> {
     "Set-Cookie": `${authCookieName}=${cookie}; Max-Age=${authCookieMaxAgeSeconds}; Path=/ask-molty; HttpOnly; Secure; SameSite=Lax`,
   });
   return new Response(null, { status: 302, headers });
+}
+
+function decodeJwtClaims(jwt: string): Record<string, unknown> | null {
+  const parts = jwt.split(".");
+  const claims = parts.length === 3 ? parts[1] : undefined;
+  if (!claims) return null;
+  try {
+    return JSON.parse(base64UrlDecode(claims)) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
 }
 
 function authErrorPage(message: string, status: number): Response {
@@ -773,8 +781,4 @@ function safeDocsReturnTo(request: Request): string | null {
   const url = new URL(request.url);
   const value = url.searchParams.get("return_to");
   return normalizeDocsReturnTo(value);
-}
-
-function stringFormValue(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
 }

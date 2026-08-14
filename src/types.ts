@@ -7,9 +7,10 @@ export interface Env {
   GITHUB_INDEX_URL?: string;
   WORKSPACE_MANIFEST_URL?: string;
   OPENAI_MODEL?: string;
-  CLAWHUB_AUTH_URL?: string;
-  CLAWHUB_SESSION_VERIFY_URL?: string;
   ASK_MOLTY_AUTH_SECRET?: string;
+  OPENCLAW_ID_ISSUER?: string;
+  OPENCLAW_ID_CLIENT_ID?: string;
+  OPENCLAW_ID_CLIENT_SECRET?: string;
 }
 
 export interface SearchRecord {
