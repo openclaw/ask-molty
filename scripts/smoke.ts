@@ -4,7 +4,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { normalizeDocsReturnTo } from "../src/auth";
-import { buildWorkspace } from "../src/retrieval";
+import {
+  buildWorkspace,
+  maxJsonlStreamBytes,
+  maxSourceRawBytes,
+  maxWorkspaceTextBytes,
+} from "../src/retrieval";
 import type { Env } from "../src/types";
 
 const root = process.cwd();
@@ -16,28 +21,35 @@ const required = [
   "workspace-manifest.json",
 ];
 
-for (const rel of required) {
-  const file = path.join(outDir, rel);
-  if (!fs.existsSync(file)) throw new Error(`missing ${rel}`);
-  if (fs.statSync(file).size < 10) throw new Error(`empty ${rel}`);
-}
-
-const manifest = JSON.parse(fs.readFileSync(path.join(outDir, "workspace-manifest.json"), "utf8"));
-const fileCount = Object.keys(manifest.files ?? {}).length;
-if (fileCount < 1000) throw new Error(`workspace too small: ${fileCount} files`);
-
-const source = fs.readFileSync(path.join(outDir, "source-search.jsonl"), "utf8");
-if (!source.includes("model-selection"))
-  throw new Error("source index did not include model-selection");
-
-const github = fs.readFileSync(path.join(outDir, "github-search.jsonl"), "utf8");
-if (!github.includes("github.com/openclaw/openclaw"))
-  throw new Error("github index missing OpenClaw links");
-
 smokeAuthRouting();
 await smokeRuntimeRetrieval();
+await smokeRetrievalBodyCaps();
 
-console.log(`ask-molty smoke ok: ${fileCount} workspace files`);
+if (process.env.ASK_MOLTY_SKIP_EXPORT_SMOKE === "1") {
+  console.log("ask-molty smoke ok: runtime checks only");
+} else {
+  for (const rel of required) {
+    const file = path.join(outDir, rel);
+    if (!fs.existsSync(file)) throw new Error(`missing ${rel}`);
+    if (fs.statSync(file).size < 10) throw new Error(`empty ${rel}`);
+  }
+
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(outDir, "workspace-manifest.json"), "utf8"),
+  );
+  const fileCount = Object.keys(manifest.files ?? {}).length;
+  if (fileCount < 1000) throw new Error(`workspace too small: ${fileCount} files`);
+
+  const source = fs.readFileSync(path.join(outDir, "source-search.jsonl"), "utf8");
+  if (!source.includes("model-selection"))
+    throw new Error("source index did not include model-selection");
+
+  const github = fs.readFileSync(path.join(outDir, "github-search.jsonl"), "utf8");
+  if (!github.includes("github.com/openclaw/openclaw"))
+    throw new Error("github index missing OpenClaw links");
+
+  console.log(`ask-molty smoke ok: ${fileCount} workspace files`);
+}
 
 function smokeAuthRouting(): void {
   const canonical = normalizeDocsReturnTo("https://docs.clawhub.ai/plugins");
@@ -200,6 +212,103 @@ async function smokeRuntimeRetrieval(): Promise<void> {
     },
   );
   console.log("runtime retrieval ok: docs outage keeps source and GitHub context");
+}
+
+async function smokeRetrievalBodyCaps(): Promise<void> {
+  const docsIndexUrl = "https://example.test/docs-search.json";
+  const docsCorpusUrl = "https://example.test/llms-full.txt";
+  const sourceIndexUrl = "https://example.test/source-index.jsonl";
+  const githubIndexUrl = "https://example.test/github-search.jsonl";
+  const rawUrl = "https://example.test/raw/huge.ts";
+  const env: Env = {
+    OPENAI_API_KEY: "test",
+    DOCS_INDEX_URL: docsIndexUrl,
+    DOCS_CORPUS_URL: docsCorpusUrl,
+    SOURCE_INDEX_URL: sourceIndexUrl,
+    GITHUB_INDEX_URL: githubIndexUrl,
+  };
+  const sourceIndex = `${JSON.stringify({
+    path: "src/huge.ts",
+    search: "huge source implementation file ".repeat(80),
+    rawUrl,
+    url: "https://github.com/openclaw/openclaw/blob/main/src/huge.ts",
+  })}\n`;
+
+  const corpusPulled = { bytes: 0 };
+  const corpusTotal = maxWorkspaceTextBytes + 2_000_000;
+  await withMockNetwork(
+    async (url) => {
+      if (url === docsCorpusUrl) return new Response(trackedStream(corpusTotal, corpusPulled));
+      return new Response("missing", { status: 404 });
+    },
+    async () => {
+      await buildWorkspace(env, "obscure fallback phrase");
+    },
+  );
+  assertCappedRead("docs corpus loadText", corpusPulled.bytes, corpusTotal, maxWorkspaceTextBytes);
+
+  const jsonlPulled = { bytes: 0 };
+  const jsonlTotal = maxJsonlStreamBytes + 2_000_000;
+  await withMockNetwork(
+    async (url) => {
+      if (url === sourceIndexUrl) return new Response(trackedStream(jsonlTotal, jsonlPulled));
+      return new Response("missing", { status: 404 });
+    },
+    async () => {
+      await buildWorkspace(env, "huge source implementation");
+    },
+  );
+  assertCappedRead("source JSONL stream", jsonlPulled.bytes, jsonlTotal, maxJsonlStreamBytes);
+
+  const rawPulled = { bytes: 0 };
+  const rawTotal = maxSourceRawBytes + 32_768;
+  await withMockNetwork(
+    async (url) => {
+      if (url === sourceIndexUrl) return new Response(sourceIndex);
+      if (url === rawUrl) return new Response(trackedStream(rawTotal, rawPulled, 4096));
+      return new Response("missing", { status: 404 });
+    },
+    async () => {
+      const files = await buildWorkspace(env, "huge source implementation");
+      if (!files.some((file) => file.kind === "source")) {
+        throw new Error("retrieval body cap: source file was not mounted");
+      }
+    },
+  );
+  assertCappedRead("source rawUrl loadText", rawPulled.bytes, rawTotal, maxSourceRawBytes);
+  console.log("retrieval body cap ok: corpus, JSONL, and rawUrl reads stay under caps");
+}
+
+function assertCappedRead(label: string, pulled: number, total: number, cap: number): void {
+  if (pulled >= total) {
+    throw new Error(`${label}: read entire ${total} byte body; expected stop near ${cap}`);
+  }
+  if (pulled > cap + 131_072) {
+    throw new Error(`${label}: read ${pulled} bytes, far past cap ${cap}`);
+  }
+  if (pulled < 1) {
+    throw new Error(`${label}: read no bytes`);
+  }
+}
+
+function trackedStream(
+  totalBytes: number,
+  counter: { bytes: number },
+  chunkSize = 65_536,
+): ReadableStream<Uint8Array> {
+  let sent = 0;
+  return new ReadableStream({
+    pull(controller) {
+      if (sent >= totalBytes) {
+        controller.close();
+        return;
+      }
+      const n = Math.min(chunkSize, totalBytes - sent);
+      counter.bytes += n;
+      sent += n;
+      controller.enqueue(new Uint8Array(n).fill(65));
+    },
+  });
 }
 
 function fakeR2(objects: Record<string, string>): R2Bucket {
