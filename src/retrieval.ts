@@ -447,9 +447,15 @@ async function selectJsonlStream(
       const { done, value } = await reader.read();
       if (done) break;
       if (!value?.byteLength) continue;
-      totalBytes += value.byteLength;
-      buffer += decoder.decode(value, { stream: true });
-      if (totalBytes > maxJsonlStreamBytes || buffer.length > 1_048_576) {
+      const remainingBytes = maxJsonlStreamBytes - totalBytes;
+      const chunk = value.subarray(0, remainingBytes);
+      totalBytes += chunk.byteLength;
+      buffer += decoder.decode(chunk, { stream: true });
+      if (
+        value.byteLength > remainingBytes ||
+        totalBytes === maxJsonlStreamBytes ||
+        buffer.length > 1_048_576
+      ) {
         const lines = buffer.split("\n");
         lines.pop();
         for (const line of lines) processLine(line);

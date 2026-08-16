@@ -252,7 +252,9 @@ async function smokeRetrievalBodyCaps(): Promise<void> {
   const jsonlTotal = maxJsonlStreamBytes + 2_000_000;
   await withMockNetwork(
     async (url) => {
-      if (url === sourceIndexUrl) return new Response(trackedStream(jsonlTotal, jsonlPulled));
+      if (url === sourceIndexUrl) {
+        return new Response(trackedStream(jsonlTotal, jsonlPulled, 65_536, true));
+      }
       return new Response("missing", { status: 404 });
     },
     async () => {
@@ -308,6 +310,7 @@ function trackedStream(
   totalBytes: number,
   counter: { bytes: number },
   chunkSize = 65_536,
+  lineDelimited = false,
 ): ReadableStream<Uint8Array> {
   let sent = 0;
   return new ReadableStream({
@@ -319,7 +322,9 @@ function trackedStream(
       const n = Math.min(chunkSize, totalBytes - sent);
       counter.bytes += n;
       sent += n;
-      controller.enqueue(new Uint8Array(n).fill(65));
+      const chunk = new Uint8Array(n).fill(65);
+      if (lineDelimited) chunk[n - 1] = 10;
+      controller.enqueue(chunk);
     },
   });
 }
