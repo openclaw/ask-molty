@@ -8,6 +8,11 @@ const githubIndexUrl =
   "https://github.com/openclaw/ask-molty/releases/download/workspace-latest/github-search.jsonl";
 const workspaceManifestUrl = "https://docs.openclaw.ai/ask-molty/workspace-manifest.json";
 const loadTextRetryDelaysMs = [150, 450];
+export const maxWorkspaceTextBytes = 16_000_000;
+export const maxJsonlStreamBytes = 24_000_000;
+export const maxSourceRawChars = 12_000;
+// A valid UTF-8 scalar needs at most three bytes per UTF-16 code unit.
+export const maxSourceRawBytes = maxSourceRawChars * 3;
 
 interface RecordSelection {
   matches: SearchRecord[];
@@ -128,13 +133,13 @@ async function loadText(
   const cache = caches.default;
   const key = new Request(url, { method: "GET" });
   const cached = await cache.match(key);
-  if (cached?.ok) return cached.text();
+  if (cached?.ok) return readCappedText(cached, url, maxWorkspaceTextBytes, "strict");
   let lastError: unknown;
   for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
     try {
       const response = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 300 } });
       if (!response.ok) throw new Error(`Unable to load ${url}: ${response.status}`);
-      const text = await response.text();
+      const text = await readCappedText(response, url, maxWorkspaceTextBytes, "strict");
       if (text.startsWith("<!DOCTYPE html>") || text.length < minLength)
         throw new Error(`Invalid text from ${url}`);
       await cache.put(
@@ -144,11 +149,76 @@ async function loadText(
       return text;
     } catch (error) {
       lastError = error;
+      if (isByteCapError(error)) break;
       const delay = retryDelaysMs[attempt];
       if (delay) await sleep(delay);
     }
   }
   throw lastError instanceof Error ? lastError : new Error(`Unable to load ${url}`);
+}
+
+async function loadTextPrefix(url: string, maxBytes: number): Promise<string> {
+  const response = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 300 } });
+  if (!response.ok) throw new Error(`Unable to load ${url}: ${response.status}`);
+  return readCappedText(response, url, maxBytes, "prefix");
+}
+
+async function readCappedText(
+  response: Response,
+  url: string,
+  maxBytes: number,
+  mode: "strict" | "prefix",
+): Promise<string> {
+  const declared = Number(response.headers.get("content-length") ?? "");
+  if (mode === "strict" && Number.isFinite(declared) && declared > maxBytes) {
+    throw byteCapError(url, maxBytes);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    const text = await response.text();
+    const bytes = new TextEncoder().encode(text);
+    if (bytes.byteLength <= maxBytes) return text;
+    if (mode === "prefix") return new TextDecoder().decode(bytes.subarray(0, maxBytes));
+    throw byteCapError(url, maxBytes);
+  }
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value?.byteLength) continue;
+    const remaining = maxBytes - total;
+    if (value.byteLength > remaining) {
+      if (mode === "prefix" && remaining > 0) chunks.push(value.subarray(0, remaining));
+      await reader.cancel();
+      if (mode === "prefix") return decodeUtf8(chunks);
+      throw byteCapError(url, maxBytes);
+    }
+    chunks.push(value);
+    total += value.byteLength;
+  }
+  return decodeUtf8(chunks);
+}
+
+function byteCapError(url: string, maxBytes: number): Error {
+  return new Error(`Text from ${url} exceeds ${maxBytes} bytes`);
+}
+
+function isByteCapError(error: unknown): boolean {
+  return error instanceof Error && / exceeds \d+ bytes$/.test(error.message);
+}
+
+function decodeUtf8(chunks: Uint8Array[]): string {
+  const total = chunks.reduce((n, chunk) => n + chunk.byteLength, 0);
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
 }
 
 async function loadDocsCorpus(env: Env): Promise<string> {
@@ -249,6 +319,10 @@ async function loadR2Text(env: Env, key: string, minLength: number): Promise<str
   try {
     const object = await env.DOCS_ARTIFACTS.get(key);
     if (!object) return null;
+    if (object.size > maxWorkspaceTextBytes) {
+      console.warn("stored retrieval artifact exceeds cap", { key, size: object.size });
+      return null;
+    }
     const text = await object.text();
     if (text.startsWith("<!DOCTYPE html>") || text.length < minLength) return null;
     return text;
@@ -367,16 +441,38 @@ async function selectJsonlStream(
     }
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-    for (const line of lines) processLine(line);
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value?.byteLength) continue;
+      const remainingBytes = maxJsonlStreamBytes - totalBytes;
+      const chunk = value.subarray(0, remainingBytes);
+      totalBytes += chunk.byteLength;
+      buffer += decoder.decode(chunk, { stream: true });
+      if (
+        value.byteLength > remainingBytes ||
+        totalBytes === maxJsonlStreamBytes ||
+        buffer.length > 1_048_576
+      ) {
+        const lines = buffer.split("\n");
+        lines.pop();
+        for (const line of lines) processLine(line);
+        buffer = "";
+        break;
+      }
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) processLine(line);
+    }
+    if (buffer) {
+      buffer += decoder.decode();
+      if (buffer.trim()) processLine(buffer);
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
   }
-  buffer += decoder.decode();
-  if (buffer.trim()) processLine(buffer);
 
   ranked.sort((a, b) => b.score - a.score);
   return {
@@ -504,8 +600,8 @@ function recordToWorkspaceFile(record: SearchRecord): WorkspaceFile {
 
 async function sourceToWorkspaceFile(record: SearchRecord): Promise<WorkspaceFile> {
   if (!record.rawUrl) return recordToWorkspaceFile(record);
-  const raw = await loadText(record.rawUrl, 1).catch(() => "");
-  const body = raw ? fencedSource(record.path, raw.slice(0, 12_000)) : record.search;
+  const raw = await loadTextPrefix(record.rawUrl, maxSourceRawBytes).catch(() => "");
+  const body = raw ? fencedSource(record.path, raw.slice(0, maxSourceRawChars)) : record.search;
   return {
     path: record.workspacePath ?? `/source/${flatPath(record.path)}.md`,
     kind: "source",
