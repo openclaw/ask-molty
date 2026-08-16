@@ -10,7 +10,9 @@ const workspaceManifestUrl = "https://docs.openclaw.ai/ask-molty/workspace-manif
 const loadTextRetryDelaysMs = [150, 450];
 export const maxWorkspaceTextBytes = 16_000_000;
 export const maxJsonlStreamBytes = 24_000_000;
-export const maxSourceRawBytes = 16_384;
+export const maxSourceRawChars = 12_000;
+// A valid UTF-8 scalar needs at most three bytes per UTF-16 code unit.
+export const maxSourceRawBytes = maxSourceRawChars * 3;
 
 interface RecordSelection {
   matches: SearchRecord[];
@@ -593,7 +595,7 @@ function recordToWorkspaceFile(record: SearchRecord): WorkspaceFile {
 async function sourceToWorkspaceFile(record: SearchRecord): Promise<WorkspaceFile> {
   if (!record.rawUrl) return recordToWorkspaceFile(record);
   const raw = await loadTextPrefix(record.rawUrl, maxSourceRawBytes).catch(() => "");
-  const body = raw ? fencedSource(record.path, raw.slice(0, 12_000)) : record.search;
+  const body = raw ? fencedSource(record.path, raw.slice(0, maxSourceRawChars)) : record.search;
   return {
     path: record.workspacePath ?? `/source/${flatPath(record.path)}.md`,
     kind: "source",

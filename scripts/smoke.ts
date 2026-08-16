@@ -8,6 +8,7 @@ import {
   buildWorkspace,
   maxJsonlStreamBytes,
   maxSourceRawBytes,
+  maxSourceRawChars,
   maxWorkspaceTextBytes,
 } from "../src/retrieval";
 import type { Env } from "../src/types";
@@ -260,22 +261,34 @@ async function smokeRetrievalBodyCaps(): Promise<void> {
   );
   assertCappedRead("source JSONL stream", jsonlPulled.bytes, jsonlTotal, maxJsonlStreamBytes);
 
+  const rawText = "漢".repeat(maxSourceRawChars + 4096);
+  const rawBytes = new TextEncoder().encode(rawText);
   const rawPulled = { bytes: 0 };
-  const rawTotal = maxSourceRawBytes + 32_768;
+  let sourceContent = "";
   await withMockNetwork(
     async (url) => {
       if (url === sourceIndexUrl) return new Response(sourceIndex);
-      if (url === rawUrl) return new Response(trackedStream(rawTotal, rawPulled, 4096));
+      if (url === rawUrl) return new Response(trackedBytes(rawBytes, rawPulled, 4096));
       return new Response("missing", { status: 404 });
     },
     async () => {
       const files = await buildWorkspace(env, "huge source implementation");
-      if (!files.some((file) => file.kind === "source")) {
+      const source = files.find((file) => file.kind === "source");
+      if (!source) {
         throw new Error("retrieval body cap: source file was not mounted");
       }
+      sourceContent = source.content;
     },
   );
-  assertCappedRead("source rawUrl loadText", rawPulled.bytes, rawTotal, maxSourceRawBytes);
+  assertCappedRead(
+    "source rawUrl loadText",
+    rawPulled.bytes,
+    rawBytes.byteLength,
+    maxSourceRawBytes,
+  );
+  if (!sourceContent.includes("漢".repeat(maxSourceRawChars))) {
+    throw new Error("retrieval body cap: multibyte source lost part of the context window");
+  }
   console.log("retrieval body cap ok: corpus, JSONL, and rawUrl reads stay under caps");
 }
 
@@ -307,6 +320,27 @@ function trackedStream(
       counter.bytes += n;
       sent += n;
       controller.enqueue(new Uint8Array(n).fill(65));
+    },
+  });
+}
+
+function trackedBytes(
+  bytes: Uint8Array,
+  counter: { bytes: number },
+  chunkSize: number,
+): ReadableStream<Uint8Array> {
+  let offset = 0;
+  return new ReadableStream({
+    pull(controller) {
+      if (offset >= bytes.byteLength) {
+        controller.close();
+        return;
+      }
+      const end = Math.min(offset + chunkSize, bytes.byteLength);
+      const chunk = bytes.subarray(offset, end);
+      counter.bytes += chunk.byteLength;
+      offset = end;
+      controller.enqueue(chunk);
     },
   });
 }
