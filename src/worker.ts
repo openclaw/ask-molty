@@ -12,6 +12,7 @@ import type {
 const maxMessageLength = 2000;
 const maxToolRounds = 4;
 const maxShellOutput = 16_000;
+export const openAIFetchTimeoutMs = 60_000;
 const authCookieName = "ask_molty_session";
 const authCookieMaxAgeSeconds = 60 * 60 * 24 * 7;
 const artifactUrls: Record<string, string> = {
@@ -311,15 +312,11 @@ function truncateShell(value: string): string {
     : value;
 }
 
-async function streamAnswer(
+export async function streamAnswer(
   env: Env,
   messages: OpenAIMessage[],
 ): Promise<ReadableStream<Uint8Array>> {
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: openAIHeaders(env),
-    body: JSON.stringify({ ...openAIBody(env, messages, false), stream: true }),
-  });
+  const response = await fetchOpenAI(env, { ...openAIBody(env, messages, false), stream: true });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`OpenAI error ${response.status}: ${text.slice(0, 300)}`);
@@ -394,22 +391,33 @@ function safeFlushLength(text: string): number {
   return text.length;
 }
 
-async function openAI(
+export async function openAI(
   env: Env,
   messages: OpenAIMessage[],
   withTools: boolean,
 ): Promise<OpenAIChatResponse> {
-  const body = openAIBody(env, messages, withTools);
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: openAIHeaders(env),
-    body: JSON.stringify(body),
-  });
+  const response = await fetchOpenAI(env, openAIBody(env, messages, withTools));
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`OpenAI error ${response.status}: ${text.slice(0, 300)}`);
   }
   return response.json<OpenAIChatResponse>();
+}
+
+async function fetchOpenAI(env: Env, body: Record<string, unknown>): Promise<Response> {
+  try {
+    return await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: openAIHeaders(env),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(openAIFetchTimeoutMs),
+    });
+  } catch (error) {
+    if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+      throw new Error("OpenAI request timed out");
+    }
+    throw error;
+  }
 }
 
 function openAIBody(

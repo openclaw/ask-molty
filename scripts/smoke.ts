@@ -6,6 +6,7 @@ import path from "node:path";
 import { normalizeDocsReturnTo } from "../src/auth";
 import { buildWorkspace } from "../src/retrieval";
 import type { Env } from "../src/types";
+import { openAI, streamAnswer } from "../src/worker";
 
 const root = process.cwd();
 const outDir = path.join(root, "dist", "test");
@@ -16,28 +17,35 @@ const required = [
   "workspace-manifest.json",
 ];
 
-for (const rel of required) {
-  const file = path.join(outDir, rel);
-  if (!fs.existsSync(file)) throw new Error(`missing ${rel}`);
-  if (fs.statSync(file).size < 10) throw new Error(`empty ${rel}`);
-}
-
-const manifest = JSON.parse(fs.readFileSync(path.join(outDir, "workspace-manifest.json"), "utf8"));
-const fileCount = Object.keys(manifest.files ?? {}).length;
-if (fileCount < 1000) throw new Error(`workspace too small: ${fileCount} files`);
-
-const source = fs.readFileSync(path.join(outDir, "source-search.jsonl"), "utf8");
-if (!source.includes("model-selection"))
-  throw new Error("source index did not include model-selection");
-
-const github = fs.readFileSync(path.join(outDir, "github-search.jsonl"), "utf8");
-if (!github.includes("github.com/openclaw/openclaw"))
-  throw new Error("github index missing OpenClaw links");
-
 smokeAuthRouting();
+await smokeOpenAIFetchTimeout();
 await smokeRuntimeRetrieval();
 
-console.log(`ask-molty smoke ok: ${fileCount} workspace files`);
+if (process.env.ASK_MOLTY_SKIP_EXPORT_SMOKE === "1") {
+  console.log("ask-molty smoke ok: runtime checks only");
+} else {
+  for (const rel of required) {
+    const file = path.join(outDir, rel);
+    if (!fs.existsSync(file)) throw new Error(`missing ${rel}`);
+    if (fs.statSync(file).size < 10) throw new Error(`empty ${rel}`);
+  }
+
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(outDir, "workspace-manifest.json"), "utf8"),
+  );
+  const fileCount = Object.keys(manifest.files ?? {}).length;
+  if (fileCount < 1000) throw new Error(`workspace too small: ${fileCount} files`);
+
+  const source = fs.readFileSync(path.join(outDir, "source-search.jsonl"), "utf8");
+  if (!source.includes("model-selection"))
+    throw new Error("source index did not include model-selection");
+
+  const github = fs.readFileSync(path.join(outDir, "github-search.jsonl"), "utf8");
+  if (!github.includes("github.com/openclaw/openclaw"))
+    throw new Error("github index missing OpenClaw links");
+
+  console.log(`ask-molty smoke ok: ${fileCount} workspace files`);
+}
 
 function smokeAuthRouting(): void {
   const canonical = normalizeDocsReturnTo("https://docs.clawhub.ai/plugins");
@@ -202,6 +210,109 @@ async function smokeRuntimeRetrieval(): Promise<void> {
   console.log("runtime retrieval ok: docs outage keeps source and GitHub context");
 }
 
+async function smokeOpenAIFetchTimeout(): Promise<void> {
+  const env: Env = { OPENAI_API_KEY: "test" };
+  const messages = [{ role: "user" as const, content: "ping" }];
+  const signals: Array<AbortSignal | undefined> = [];
+
+  await withMockNetwork(
+    async (url, init) => {
+      if (!url.includes("api.openai.com/v1/chat/completions")) {
+        return new Response("missing", { status: 404 });
+      }
+      signals.push(init?.signal ?? undefined);
+      if (init?.body && String(init.body).includes('"stream":true')) {
+        return new Response("data: [DONE]\n\n", {
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      return Response.json({ choices: [{ message: { role: "assistant", content: "ok" } }] });
+    },
+    async () => {
+      await openAI(env, messages, false);
+      const stream = await streamAnswer(env, messages);
+      await stream.pipeTo(new WritableStream());
+    },
+  );
+
+  if (signals.length !== 2) {
+    throw new Error(`OpenAI fetch timeout: expected 2 chat fetches, got ${signals.length}`);
+  }
+  for (const [index, signal] of signals.entries()) {
+    if (!(signal instanceof AbortSignal)) {
+      throw new Error(`OpenAI fetch timeout: fetch ${index + 1} has no AbortSignal`);
+    }
+  }
+  console.log("openai fetch timeout ok: chat and tool fetches pass AbortSignal");
+
+  const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
+  AbortSignal.timeout = (ms: number) => originalTimeout(Math.min(ms, 20));
+  try {
+    await withMockNetwork(
+      async (url, init) => {
+        if (!url.includes("api.openai.com/v1/chat/completions")) {
+          return new Response("missing", { status: 404 });
+        }
+        return new Promise((_resolve, reject) => {
+          const signal = init?.signal;
+          if (!signal) return;
+          const fail = () => {
+            const error = new Error("The operation was aborted due to timeout");
+            error.name = "TimeoutError";
+            reject(error);
+          };
+          if (signal.aborted) fail();
+          else signal.addEventListener("abort", fail, { once: true });
+        });
+      },
+      async () => {
+        const started = Date.now();
+        let timedOut = false;
+        try {
+          await Promise.race([
+            openAI(env, messages, true),
+            new Promise((_, reject) => {
+              setTimeout(
+                () => reject(new Error("OpenAI fetch watchdog: request did not abort")),
+                1000,
+              );
+            }),
+          ]);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (message.includes("watchdog")) throw error;
+          timedOut = true;
+        }
+        if (!timedOut) throw new Error("OpenAI tool fetch hung instead of aborting");
+        if (Date.now() - started > 500) {
+          throw new Error("OpenAI tool fetch abort took too long");
+        }
+
+        timedOut = false;
+        try {
+          await Promise.race([
+            streamAnswer(env, messages),
+            new Promise((_, reject) => {
+              setTimeout(
+                () => reject(new Error("OpenAI stream watchdog: request did not abort")),
+                1000,
+              );
+            }),
+          ]);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (message.includes("watchdog")) throw error;
+          timedOut = true;
+        }
+        if (!timedOut) throw new Error("OpenAI stream fetch hung instead of aborting");
+      },
+    );
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+  }
+  console.log("openai fetch timeout ok: hung chat and tool fetches abort");
+}
+
 function fakeR2(objects: Record<string, string>): R2Bucket {
   return {
     get: async (key: string) => {
@@ -218,7 +329,7 @@ function fakeR2(objects: Record<string, string>): R2Bucket {
 }
 
 async function withMockNetwork(
-  fetchText: (url: string) => Promise<Response>,
+  fetchText: (url: string, init?: RequestInit) => Promise<Response>,
   run: () => Promise<void>,
 ): Promise<void> {
   const originalFetch = globalThis.fetch;
@@ -226,9 +337,9 @@ async function withMockNetwork(
   const cache = new Map<string, string>();
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
-    value: (input: RequestInfo | URL) => {
+    value: (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      return fetchText(url);
+      return fetchText(url, init);
     },
   });
   Object.defineProperty(globalThis, "caches", {
