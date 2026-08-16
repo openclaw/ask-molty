@@ -12,6 +12,10 @@ import type {
 const maxMessageLength = 2000;
 const maxToolRounds = 4;
 const maxShellOutput = 16_000;
+export const openAITimeouts = {
+  headerMs: 60_000,
+  bodyIdleMs: 60_000,
+};
 const authCookieName = "ask_molty_session";
 const authCookieMaxAgeSeconds = 60 * 60 * 24 * 7;
 const artifactUrls: Record<string, string> = {
@@ -311,21 +315,57 @@ function truncateShell(value: string): string {
     : value;
 }
 
-async function streamAnswer(
+export async function streamAnswer(
   env: Env,
   messages: OpenAIMessage[],
 ): Promise<ReadableStream<Uint8Array>> {
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: openAIHeaders(env),
-    body: JSON.stringify({ ...openAIBody(env, messages, false), stream: true }),
-  });
+  const response = await fetchOpenAI(env, { ...openAIBody(env, messages, false), stream: true });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`OpenAI error ${response.status}: ${text.slice(0, 300)}`);
   }
   if (!response.body) throw new Error("OpenAI stream missing response body");
   return response.body.pipeThrough(openAITextStream());
+}
+
+function withBodyIdleTimeout(
+  body: ReadableStream<Uint8Array>,
+  idleMs: number,
+): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const clearTimer = () => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+  };
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const timeoutError = Object.assign(new Error("OpenAI response body idle timed out"), {
+        name: "TimeoutError",
+      });
+      try {
+        const result = await Promise.race([
+          reader.read(),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => reject(timeoutError), idleMs);
+          }),
+        ]);
+        clearTimer();
+        if (result.done) controller.close();
+        else controller.enqueue(result.value);
+      } catch (error) {
+        clearTimer();
+        void reader.cancel(error).catch(() => undefined);
+        controller.error(error);
+      }
+    },
+    cancel(reason) {
+      clearTimer();
+      return reader.cancel(reason);
+    },
+  });
 }
 
 function openAITextStream(): TransformStream<Uint8Array, Uint8Array> {
@@ -394,22 +434,43 @@ function safeFlushLength(text: string): number {
   return text.length;
 }
 
-async function openAI(
+export async function openAI(
   env: Env,
   messages: OpenAIMessage[],
   withTools: boolean,
 ): Promise<OpenAIChatResponse> {
-  const body = openAIBody(env, messages, withTools);
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: openAIHeaders(env),
-    body: JSON.stringify(body),
-  });
+  const response = await fetchOpenAI(env, openAIBody(env, messages, withTools));
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`OpenAI error ${response.status}: ${text.slice(0, 300)}`);
   }
   return response.json<OpenAIChatResponse>();
+}
+
+async function fetchOpenAI(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const controller = new AbortController();
+  const headerTimer = setTimeout(() => controller.abort(), openAITimeouts.headerMs);
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: openAIHeaders(env),
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    clearTimeout(headerTimer);
+    if (!response.body) return response;
+    return new Response(withBodyIdleTimeout(response.body, openAITimeouts.bodyIdleMs), {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  } catch (error) {
+    clearTimeout(headerTimer);
+    if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+      throw new Error("OpenAI request timed out");
+    }
+    throw error;
+  }
 }
 
 function openAIBody(
