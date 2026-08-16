@@ -6,7 +6,7 @@ import path from "node:path";
 import { normalizeDocsReturnTo } from "../src/auth";
 import { buildWorkspace } from "../src/retrieval";
 import type { Env } from "../src/types";
-import { openAI, streamAnswer } from "../src/worker";
+import { openAI, openAITimeouts, streamAnswer } from "../src/worker";
 
 const root = process.cwd();
 const outDir = path.join(root, "dist", "test");
@@ -245,8 +245,9 @@ async function smokeOpenAIFetchTimeout(): Promise<void> {
   }
   console.log("openai fetch timeout ok: chat and tool fetches pass AbortSignal");
 
-  const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
-  AbortSignal.timeout = (ms: number) => originalTimeout(Math.min(ms, 20));
+  const previousHeaderMs = openAITimeouts.headerMs;
+  const previousIdleMs = openAITimeouts.streamIdleMs;
+  openAITimeouts.headerMs = 20;
   try {
     await withMockNetwork(
       async (url, init) => {
@@ -308,9 +309,85 @@ async function smokeOpenAIFetchTimeout(): Promise<void> {
       },
     );
   } finally {
-    AbortSignal.timeout = originalTimeout;
+    openAITimeouts.headerMs = previousHeaderMs;
   }
   console.log("openai fetch timeout ok: hung chat and tool fetches abort");
+
+  openAITimeouts.headerMs = 30;
+  openAITimeouts.streamIdleMs = 80;
+  try {
+    await withMockNetwork(
+      async (url) => {
+        if (!url.includes("api.openai.com/v1/chat/completions")) {
+          return new Response("missing", { status: 404 });
+        }
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              const encoder = new TextEncoder();
+              controller.enqueue(
+                encoder.encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'),
+              );
+            },
+          }),
+          { headers: { "Content-Type": "text/event-stream" } },
+        );
+      },
+      async () => {
+        const stream = await streamAnswer(env, messages);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        let idleTimedOut = false;
+        try {
+          await stream.pipeTo(new WritableStream());
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!message.includes("idle timed out")) throw error;
+          idleTimedOut = true;
+        }
+        if (!idleTimedOut) throw new Error("OpenAI stream idle timeout did not fire");
+      },
+    );
+
+    openAITimeouts.headerMs = 40;
+    openAITimeouts.streamIdleMs = 200;
+    await withMockNetwork(
+      async (url) => {
+        if (!url.includes("api.openai.com/v1/chat/completions")) {
+          return new Response("missing", { status: 404 });
+        }
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              const encoder = new TextEncoder();
+              controller.enqueue(
+                encoder.encode('data: {"choices":[{"delta":{"content":"a"}}]}\n\n'),
+              );
+              setTimeout(() => {
+                controller.enqueue(
+                  encoder.encode('data: {"choices":[{"delta":{"content":"b"}}]}\n\n'),
+                );
+                controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+                controller.close();
+              }, 80);
+            },
+          }),
+          { headers: { "Content-Type": "text/event-stream" } },
+        );
+      },
+      async () => {
+        const started = Date.now();
+        const stream = await streamAnswer(env, messages);
+        await stream.pipeTo(new WritableStream());
+        if (Date.now() - started < 60) {
+          throw new Error("healthy stream finished before the delayed chunk");
+        }
+      },
+    );
+  } finally {
+    openAITimeouts.headerMs = previousHeaderMs;
+    openAITimeouts.streamIdleMs = previousIdleMs;
+  }
+  console.log("openai fetch timeout ok: header deadline does not cut a healthy stream");
 }
 
 function fakeR2(objects: Record<string, string>): R2Bucket {

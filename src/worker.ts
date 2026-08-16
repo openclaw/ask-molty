@@ -12,7 +12,10 @@ import type {
 const maxMessageLength = 2000;
 const maxToolRounds = 4;
 const maxShellOutput = 16_000;
-export const openAIFetchTimeoutMs = 60_000;
+export const openAITimeouts = {
+  headerMs: 60_000,
+  streamIdleMs: 60_000,
+};
 const authCookieName = "ask_molty_session";
 const authCookieMaxAgeSeconds = 60 * 60 * 24 * 7;
 const artifactUrls: Record<string, string> = {
@@ -322,7 +325,44 @@ export async function streamAnswer(
     throw new Error(`OpenAI error ${response.status}: ${text.slice(0, 300)}`);
   }
   if (!response.body) throw new Error("OpenAI stream missing response body");
-  return response.body.pipeThrough(openAITextStream());
+  return withStreamIdleTimeout(response.body, openAITimeouts.streamIdleMs).pipeThrough(
+    openAITextStream(),
+  );
+}
+
+function withStreamIdleTimeout(
+  body: ReadableStream<Uint8Array>,
+  idleMs: number,
+): ReadableStream<Uint8Array> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const clear = () => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+  };
+  const transform = new TransformStream<Uint8Array, Uint8Array>({
+    start(controller) {
+      timer = setTimeout(() => {
+        controller.error(
+          Object.assign(new Error("OpenAI stream idle timed out"), { name: "TimeoutError" }),
+        );
+      }, idleMs);
+    },
+    transform(chunk, controller) {
+      clear();
+      timer = setTimeout(() => {
+        controller.error(
+          Object.assign(new Error("OpenAI stream idle timed out"), { name: "TimeoutError" }),
+        );
+      }, idleMs);
+      controller.enqueue(chunk);
+    },
+    flush() {
+      clear();
+    },
+  });
+  return body.pipeThrough(transform);
 }
 
 function openAITextStream(): TransformStream<Uint8Array, Uint8Array> {
@@ -405,14 +445,19 @@ export async function openAI(
 }
 
 async function fetchOpenAI(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const controller = new AbortController();
+  const headerTimer = setTimeout(() => controller.abort(), openAITimeouts.headerMs);
   try {
-    return await fetch("https://api.openai.com/v1/chat/completions", {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: openAIHeaders(env),
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(openAIFetchTimeoutMs),
+      signal: controller.signal,
     });
+    clearTimeout(headerTimer);
+    return response;
   } catch (error) {
+    clearTimeout(headerTimer);
     if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
       throw new Error("OpenAI request timed out");
     }
