@@ -246,7 +246,7 @@ async function smokeOpenAIFetchTimeout(): Promise<void> {
   console.log("openai fetch timeout ok: chat and tool fetches pass AbortSignal");
 
   const previousHeaderMs = openAITimeouts.headerMs;
-  const previousIdleMs = openAITimeouts.streamIdleMs;
+  const previousIdleMs = openAITimeouts.bodyIdleMs;
   openAITimeouts.headerMs = 20;
   try {
     await withMockNetwork(
@@ -314,8 +314,40 @@ async function smokeOpenAIFetchTimeout(): Promise<void> {
   console.log("openai fetch timeout ok: hung chat and tool fetches abort");
 
   openAITimeouts.headerMs = 30;
-  openAITimeouts.streamIdleMs = 80;
+  openAITimeouts.bodyIdleMs = 80;
   try {
+    let toolBodyCancelled = false;
+    await withMockNetwork(
+      async (url) => {
+        if (!url.includes("api.openai.com/v1/chat/completions")) {
+          return new Response("missing", { status: 404 });
+        }
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"choices":['));
+            },
+            cancel() {
+              toolBodyCancelled = true;
+            },
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      },
+      async () => {
+        let idleTimedOut = false;
+        try {
+          await openAI(env, messages, true);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!message.includes("idle timed out")) throw error;
+          idleTimedOut = true;
+        }
+        if (!idleTimedOut) throw new Error("OpenAI tool response body idle timeout did not fire");
+      },
+    );
+    if (!toolBodyCancelled) throw new Error("OpenAI timed-out tool response was not cancelled");
+
     await withMockNetwork(
       async (url) => {
         if (!url.includes("api.openai.com/v1/chat/completions")) {
@@ -349,7 +381,7 @@ async function smokeOpenAIFetchTimeout(): Promise<void> {
     );
 
     openAITimeouts.headerMs = 40;
-    openAITimeouts.streamIdleMs = 200;
+    openAITimeouts.bodyIdleMs = 200;
     await withMockNetwork(
       async (url) => {
         if (!url.includes("api.openai.com/v1/chat/completions")) {
@@ -385,9 +417,11 @@ async function smokeOpenAIFetchTimeout(): Promise<void> {
     );
   } finally {
     openAITimeouts.headerMs = previousHeaderMs;
-    openAITimeouts.streamIdleMs = previousIdleMs;
+    openAITimeouts.bodyIdleMs = previousIdleMs;
   }
-  console.log("openai fetch timeout ok: header deadline does not cut a healthy stream");
+  console.log(
+    "openai fetch timeout ok: response bodies are idle-bounded without cutting a healthy stream",
+  );
 }
 
 function fakeR2(objects: Record<string, string>): R2Bucket {

@@ -14,7 +14,7 @@ const maxToolRounds = 4;
 const maxShellOutput = 16_000;
 export const openAITimeouts = {
   headerMs: 60_000,
-  streamIdleMs: 60_000,
+  bodyIdleMs: 60_000,
 };
 const authCookieName = "ask_molty_session";
 const authCookieMaxAgeSeconds = 60 * 60 * 24 * 7;
@@ -325,44 +325,47 @@ export async function streamAnswer(
     throw new Error(`OpenAI error ${response.status}: ${text.slice(0, 300)}`);
   }
   if (!response.body) throw new Error("OpenAI stream missing response body");
-  return withStreamIdleTimeout(response.body, openAITimeouts.streamIdleMs).pipeThrough(
-    openAITextStream(),
-  );
+  return response.body.pipeThrough(openAITextStream());
 }
 
-function withStreamIdleTimeout(
+function withBodyIdleTimeout(
   body: ReadableStream<Uint8Array>,
   idleMs: number,
 ): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const clear = () => {
+  const clearTimer = () => {
     if (timer !== undefined) {
       clearTimeout(timer);
       timer = undefined;
     }
   };
-  const transform = new TransformStream<Uint8Array, Uint8Array>({
-    start(controller) {
-      timer = setTimeout(() => {
-        controller.error(
-          Object.assign(new Error("OpenAI stream idle timed out"), { name: "TimeoutError" }),
-        );
-      }, idleMs);
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const timeoutError = Object.assign(new Error("OpenAI response body idle timed out"), {
+        name: "TimeoutError",
+      });
+      try {
+        const result = await Promise.race([
+          reader.read(),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => reject(timeoutError), idleMs);
+          }),
+        ]);
+        clearTimer();
+        if (result.done) controller.close();
+        else controller.enqueue(result.value);
+      } catch (error) {
+        clearTimer();
+        void reader.cancel(error).catch(() => undefined);
+        controller.error(error);
+      }
     },
-    transform(chunk, controller) {
-      clear();
-      timer = setTimeout(() => {
-        controller.error(
-          Object.assign(new Error("OpenAI stream idle timed out"), { name: "TimeoutError" }),
-        );
-      }, idleMs);
-      controller.enqueue(chunk);
-    },
-    flush() {
-      clear();
+    cancel(reason) {
+      clearTimer();
+      return reader.cancel(reason);
     },
   });
-  return body.pipeThrough(transform);
 }
 
 function openAITextStream(): TransformStream<Uint8Array, Uint8Array> {
@@ -455,7 +458,12 @@ async function fetchOpenAI(env: Env, body: Record<string, unknown>): Promise<Res
       signal: controller.signal,
     });
     clearTimeout(headerTimer);
-    return response;
+    if (!response.body) return response;
+    return new Response(withBodyIdleTimeout(response.body, openAITimeouts.bodyIdleMs), {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
   } catch (error) {
     clearTimeout(headerTimer);
     if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
