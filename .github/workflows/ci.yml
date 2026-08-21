@@ -34,18 +34,28 @@ jobs:
           path: docs-openclaw
           repository: openclaw/docs
 
-      - name: Read source revision
-        id: source
-        working-directory: docs-openclaw
+      - name: Materialize OpenClaw source snapshot
         run: |
-          echo "sha=$(node -p 'JSON.parse(require("fs").readFileSync(".openclaw-sync/source.json", "utf8")).sha')" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout OpenClaw source
-        uses: actions/checkout@v6
-        with:
-          path: clawdbot5
-          ref: ${{ steps.source.outputs.sha }}
-          repository: openclaw/openclaw
+          source_sha="$(
+            node -e '
+              const fs = require("node:fs");
+              const { sha } = JSON.parse(
+                fs.readFileSync("docs-openclaw/.openclaw-sync/source.json", "utf8"),
+              );
+              if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("invalid source revision");
+              process.stdout.write(sha);
+            '
+          )"
+          archive="$RUNNER_TEMP/openclaw-source.tar.gz"
+          curl --fail --location --retry 3 \
+            --output "$archive" \
+            "https://codeload.github.com/openclaw/openclaw/tar.gz/$source_sha"
+          mkdir clawdbot5
+          tar -xzf "$archive" --strip-components=1 -C clawdbot5
+          git -C clawdbot5 init --quiet
+          # The exporter only needs Git's tracked-file index; intent-to-add
+          # avoids duplicating the full source snapshot into Git objects.
+          git -C clawdbot5 add --intent-to-add --force --all
 
       - name: Create gitcrawl fixture
         run: |
