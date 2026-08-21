@@ -443,10 +443,12 @@ function stripFrontmatter(value: string): string {
 }
 
 function firstHeading(value: string): string | undefined {
-  return value
-    .match(/^#\s+(.+)$/m)?.[1]
-    ?.replace(/<[^>]+>/g, "")
-    .trim();
+  const heading = value.match(/^#\s+(.+)$/m)?.[1];
+  if (!heading) return undefined;
+  // Splitting removes every "<"; later segments keep only text after their
+  // first ">" when present, so assembled titles cannot re-form an HTML tag.
+  const [text, ...markup] = heading.split("<");
+  return [text, ...markup.map((part) => part.slice(part.indexOf(">") + 1))].join("").trim();
 }
 
 function titleize(value: string): string {
