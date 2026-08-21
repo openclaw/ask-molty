@@ -445,12 +445,10 @@ function stripFrontmatter(value: string): string {
 function firstHeading(value: string): string | undefined {
   const heading = value.match(/^#\s+(.+)$/m)?.[1];
   if (!heading) return undefined;
-  // Remove complete tags for readable titles, then any residual delimiters so
-  // malformed or nested markup cannot re-form a tag after sanitization.
-  return heading
-    .replace(/<[^>]+>/g, "")
-    .replace(/[<>]/g, "")
-    .trim();
+  // Splitting removes every "<"; later segments keep only text after their
+  // first ">" when present, so assembled titles cannot re-form an HTML tag.
+  const [text, ...markup] = heading.split("<");
+  return [text, ...markup.map((part) => part.slice(part.indexOf(">") + 1))].join("").trim();
 }
 
 function titleize(value: string): string {
