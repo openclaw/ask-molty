@@ -443,9 +443,13 @@ function stripFrontmatter(value: string): string {
 }
 
 function firstHeading(value: string): string | undefined {
-  return value
-    .match(/^#\s+(.+)$/m)?.[1]
-    ?.replace(/<[^>]+>/g, "")
+  const heading = value.match(/^#\s+(.+)$/m)?.[1];
+  if (!heading) return undefined;
+  // Remove complete tags for readable titles, then any residual delimiters so
+  // malformed or nested markup cannot re-form a tag after sanitization.
+  return heading
+    .replace(/<[^>]+>/g, "")
+    .replace(/[<>]/g, "")
     .trim();
 }
 
