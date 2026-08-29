@@ -789,7 +789,12 @@ async function oidcCallback(request: Request, env: Env): Promise<Response> {
     }),
   });
   if (!tokenResponse.ok) return authErrorPage("OpenClaw ID verification failed.", 401);
-  const tokens = await tokenResponse.json<{ id_token?: string }>();
+  let tokens: { id_token?: string };
+  try {
+    tokens = await tokenResponse.json<{ id_token?: string }>();
+  } catch {
+    return authErrorPage("OpenClaw ID verification failed.", 401);
+  }
   // The id_token arrives directly from the issuer over TLS on an
   // authenticated confidential-client exchange, so decoding without local
   // signature verification is sufficient here.
