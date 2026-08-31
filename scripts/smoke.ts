@@ -26,6 +26,7 @@ const required = [
 
 smokeAuthRouting();
 await smokeOpenAIFetchTimeout();
+await smokeOidcTokenJsonParse();
 await smokeOidcTokenFetchTimeout();
 await smokeMalformedOpenAISse();
 await smokeRuntimeRetrieval();
@@ -585,6 +586,75 @@ async function smokeOpenAIFetchTimeout(): Promise<void> {
   console.log(
     "openai fetch timeout ok: response bodies are idle-bounded without cutting a healthy stream",
   );
+}
+
+async function smokeOidcTokenJsonParse(): Promise<void> {
+  const env: Env = {
+    OPENAI_API_KEY: "test",
+    ASK_MOLTY_AUTH_SECRET: "test-oidc-secret",
+    OPENCLAW_ID_CLIENT_ID: "molty-client",
+    OPENCLAW_ID_CLIENT_SECRET: "molty-secret",
+    OPENCLAW_ID_ISSUER: "https://id.example.test/api/auth",
+  };
+  const tokenUrl = `${env.OPENCLAW_ID_ISSUER}/oauth2/token`;
+  const state = await signedOidcState("test-oidc-secret", "https://docs.openclaw.ai/install");
+  const request = () =>
+    new Request(
+      `https://docs.openclaw.ai/ask-molty/auth/oidc-callback?code=test-code&state=${state}`,
+    );
+
+  const cases: Array<{ label: string; body: string; contentType: string }> = [
+    { label: "HTML", body: "<!doctype html><title>OpenClaw ID</title>", contentType: "text/html" },
+    { label: "empty", body: "", contentType: "application/json" },
+    { label: "null", body: "null", contentType: "application/json" },
+    { label: "primitive", body: "42", contentType: "application/json" },
+    { label: "missing id_token", body: "{}", contentType: "application/json" },
+    { label: "non-string id_token", body: '{"id_token":42}', contentType: "application/json" },
+  ];
+
+  for (const tokenCase of cases) {
+    await withMockNetwork(
+      async (url) => {
+        if (url !== tokenUrl) return new Response("missing", { status: 404 });
+        return new Response(tokenCase.body, {
+          status: 200,
+          headers: { "Content-Type": tokenCase.contentType },
+        });
+      },
+      async () => {
+        let response: Response;
+        try {
+          response = await worker.fetch(request(), env);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error(`OIDC ${tokenCase.label} token body escaped as ${message}`);
+        }
+        if (response.status !== 401) {
+          throw new Error(
+            `OIDC ${tokenCase.label} token body: expected authErrorPage 401, got ${response.status}`,
+          );
+        }
+        const contentType = response.headers.get("content-type") ?? "";
+        if (!contentType.includes("text/html")) {
+          throw new Error(
+            `OIDC ${tokenCase.label} token body: expected HTML authErrorPage, got ${contentType}`,
+          );
+        }
+        const body = await response.text();
+        if (!body.includes("OpenClaw ID verification failed")) {
+          throw new Error(
+            `OIDC ${tokenCase.label} token body: authErrorPage missing copy: ${body.slice(0, 200)}`,
+          );
+        }
+        if (!body.includes("<title>Ask Molty verification failed</title>")) {
+          throw new Error(
+            `OIDC ${tokenCase.label} token body: missing authErrorPage title: ${body.slice(0, 200)}`,
+          );
+        }
+      },
+    );
+  }
+  console.log("oidc token json parse ok: invalid JSON and token shapes return authErrorPage");
 }
 
 async function smokeOidcTokenFetchTimeout(): Promise<void> {
