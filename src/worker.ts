@@ -389,9 +389,15 @@ function openAITextStream(): TransformStream<Uint8Array, Uint8Array> {
       if (!line.startsWith("data:")) continue;
       const data = line.slice(5).trim();
       if (!data || data === "[DONE]") continue;
-      const parsed = JSON.parse(data) as OpenAIStreamChunk;
+      let parsed: OpenAIStreamChunk;
+      try {
+        parsed = JSON.parse(data) as OpenAIStreamChunk;
+      } catch {
+        continue;
+      }
+      if (!parsed || typeof parsed !== "object") continue;
       const content = parsed.choices?.[0]?.delta?.content;
-      if (!content) continue;
+      if (typeof content !== "string" || !content) continue;
       textBuffer += content;
       flushText(controller);
     }

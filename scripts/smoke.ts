@@ -25,6 +25,7 @@ const required = [
 
 smokeAuthRouting();
 await smokeOpenAIFetchTimeout();
+await smokeMalformedOpenAISse();
 await smokeRuntimeRetrieval();
 await smokeRetrievalBodyCaps();
 
@@ -429,6 +430,59 @@ async function smokeOpenAIFetchTimeout(): Promise<void> {
   console.log(
     "openai fetch timeout ok: response bodies are idle-bounded without cutting a healthy stream",
   );
+}
+
+async function smokeMalformedOpenAISse(): Promise<void> {
+  const env: Env = { OPENAI_API_KEY: "test" };
+  const messages = [{ role: "user" as const, content: "ping" }];
+  const encoder = new TextEncoder();
+
+  await withMockNetwork(
+    async (url) => {
+      if (!url.includes("api.openai.com/v1/chat/completions")) {
+        return new Response("missing", { status: 404 });
+      }
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode('data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'),
+            );
+            controller.enqueue(encoder.encode("data: {not-valid-json\n\n"));
+            for (const payload of [
+              null,
+              false,
+              42,
+              "not a chunk",
+              { choices: [{ delta: { content: { text: "not text" } } }] },
+            ]) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+            }
+            controller.enqueue(
+              encoder.encode('data: {"choices":[{"delta":{"content":" world"}}]}\n\n'),
+            );
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+          },
+        }),
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+    },
+    async () => {
+      const stream = await streamAnswer(env, messages);
+      let text = "";
+      try {
+        text = await new Response(stream).text();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`OpenAI SSE: malformed JSON aborted the stream: ${message}`);
+      }
+      if (text !== "Hello world") {
+        throw new Error(`OpenAI SSE: expected "Hello world", got ${JSON.stringify(text)}`);
+      }
+    },
+  );
+  console.log("openai sse ok: malformed JSON and non-text events are skipped");
 }
 
 async function smokeRetrievalBodyCaps(): Promise<void> {
