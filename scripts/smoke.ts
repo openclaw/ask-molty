@@ -450,6 +450,10 @@ async function smokeOidcTokenJsonParse(): Promise<void> {
   const cases: Array<{ label: string; body: string; contentType: string }> = [
     { label: "HTML", body: "<!doctype html><title>OpenClaw ID</title>", contentType: "text/html" },
     { label: "empty", body: "", contentType: "application/json" },
+    { label: "null", body: "null", contentType: "application/json" },
+    { label: "primitive", body: "42", contentType: "application/json" },
+    { label: "missing id_token", body: "{}", contentType: "application/json" },
+    { label: "non-string id_token", body: '{"id_token":42}', contentType: "application/json" },
   ];
 
   for (const tokenCase of cases) {
@@ -494,7 +498,7 @@ async function smokeOidcTokenJsonParse(): Promise<void> {
       },
     );
   }
-  console.log("oidc token json parse ok: HTML and empty token bodies return authErrorPage");
+  console.log("oidc token json parse ok: invalid JSON and token shapes return authErrorPage");
 }
 
 async function signedOidcState(secret: string, returnTo: string): Promise<string> {
