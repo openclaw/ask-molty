@@ -13,7 +13,7 @@ import {
   retrievalTimeouts,
 } from "../src/retrieval";
 import type { Env } from "../src/types";
-import { openAI, openAITimeouts, streamAnswer } from "../src/worker";
+import worker, { openAI, openAITimeouts, oidcTimeouts, streamAnswer } from "../src/worker";
 
 const root = process.cwd();
 const outDir = path.join(root, "dist", "test");
@@ -26,6 +26,7 @@ const required = [
 
 smokeAuthRouting();
 await smokeOpenAIFetchTimeout();
+await smokeOidcTokenFetchTimeout();
 await smokeMalformedOpenAISse();
 await smokeRuntimeRetrieval();
 await smokeRetrievalFetchTimeout();
@@ -584,6 +585,131 @@ async function smokeOpenAIFetchTimeout(): Promise<void> {
   console.log(
     "openai fetch timeout ok: response bodies are idle-bounded without cutting a healthy stream",
   );
+}
+
+async function smokeOidcTokenFetchTimeout(): Promise<void> {
+  const env: Env = {
+    OPENAI_API_KEY: "test",
+    ASK_MOLTY_AUTH_SECRET: "test-oidc-secret",
+    OPENCLAW_ID_CLIENT_ID: "molty-client",
+    OPENCLAW_ID_CLIENT_SECRET: "molty-secret",
+    OPENCLAW_ID_ISSUER: "https://id.example.test/api/auth",
+  };
+  const tokenUrl = `${env.OPENCLAW_ID_ISSUER}/oauth2/token`;
+  const state = await signedOidcState("test-oidc-secret", "https://docs.openclaw.ai/install");
+  const request = new Request(
+    `https://docs.openclaw.ai/ask-molty/auth/oidc-callback?code=test-code&state=${state}`,
+  );
+
+  const signals: Array<AbortSignal | undefined> = [];
+  await withMockNetwork(
+    async (url, init) => {
+      if (url !== tokenUrl) return new Response("missing", { status: 404 });
+      signals.push(init?.signal ?? undefined);
+      return Response.json({ id_token: fakeIdToken("user@example.com") });
+    },
+    async () => {
+      const response = await worker.fetch(request, env);
+      if (response.status !== 302) {
+        throw new Error(
+          `OIDC token fetch: expected 302 after token exchange, got ${response.status}`,
+        );
+      }
+    },
+  );
+  if (signals.length !== 1) {
+    throw new Error(`OIDC token fetch: expected 1 token fetch, got ${signals.length}`);
+  }
+  if (!(signals[0] instanceof AbortSignal)) {
+    throw new Error("OIDC token fetch: token exchange has no AbortSignal");
+  }
+  console.log("oidc token fetch timeout ok: token exchange passes AbortSignal");
+
+  const previousHeaderMs = oidcTimeouts.headerMs;
+  oidcTimeouts.headerMs = 20;
+  try {
+    await withMockNetwork(
+      async (url, init) => {
+        if (url !== tokenUrl) return new Response("missing", { status: 404 });
+        return new Promise((_resolve, reject) => {
+          const signal = init?.signal;
+          if (!signal) return;
+          const fail = () => {
+            const error = new Error("The operation was aborted due to timeout");
+            error.name = "TimeoutError";
+            reject(error);
+          };
+          if (signal.aborted) fail();
+          else signal.addEventListener("abort", fail, { once: true });
+        });
+      },
+      async () => {
+        const started = Date.now();
+        let response: Response;
+        try {
+          response = await Promise.race([
+            worker.fetch(request, env),
+            new Promise<Response>((_, reject) => {
+              setTimeout(
+                () => reject(new Error("OIDC token fetch watchdog: request did not abort")),
+                1000,
+              );
+            }),
+          ]);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (message.includes("watchdog")) throw error;
+          throw new Error(`OIDC token fetch abort escaped as ${message}`);
+        }
+        if (response.status !== 504) {
+          throw new Error(
+            `OIDC hung token fetch: expected authErrorPage 504, got ${response.status}`,
+          );
+        }
+        const body = await response.text();
+        if (!body.includes("OpenClaw ID verification timed out")) {
+          throw new Error(
+            `OIDC hung token fetch: authErrorPage missing timeout copy: ${body.slice(0, 200)}`,
+          );
+        }
+        if (Date.now() - started > 500) {
+          throw new Error("OIDC token fetch abort took too long");
+        }
+      },
+    );
+  } finally {
+    oidcTimeouts.headerMs = previousHeaderMs;
+  }
+  console.log("oidc token fetch timeout ok: hung token exchange aborts to authErrorPage");
+}
+
+async function signedOidcState(secret: string, returnTo: string): Promise<string> {
+  const encoded = base64UrlEncode(
+    JSON.stringify({ r: returnTo, exp: Math.floor(Date.now() / 1000) + 600 }),
+  );
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(encoded));
+  return `${encoded}.${base64UrlEncodeBytes(new Uint8Array(signature))}`;
+}
+
+function fakeIdToken(email: string): string {
+  return `hdr.${base64UrlEncode(JSON.stringify({ email, sub: email }))}.sig`;
+}
+
+function base64UrlEncode(value: string): string {
+  return base64UrlEncodeBytes(new TextEncoder().encode(value));
+}
+
+function base64UrlEncodeBytes(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 async function smokeMalformedOpenAISse(): Promise<void> {
