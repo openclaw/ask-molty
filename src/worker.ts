@@ -395,8 +395,9 @@ function openAITextStream(): TransformStream<Uint8Array, Uint8Array> {
       } catch {
         continue;
       }
+      if (!parsed || typeof parsed !== "object") continue;
       const content = parsed.choices?.[0]?.delta?.content;
-      if (!content) continue;
+      if (typeof content !== "string" || !content) continue;
       textBuffer += content;
       flushText(controller);
     }

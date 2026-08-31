@@ -449,6 +449,15 @@ async function smokeMalformedOpenAISse(): Promise<void> {
               encoder.encode('data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'),
             );
             controller.enqueue(encoder.encode("data: {not-valid-json\n\n"));
+            for (const payload of [
+              null,
+              false,
+              42,
+              "not a chunk",
+              { choices: [{ delta: { content: { text: "not text" } } }] },
+            ]) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+            }
             controller.enqueue(
               encoder.encode('data: {"choices":[{"delta":{"content":" world"}}]}\n\n'),
             );
@@ -473,7 +482,7 @@ async function smokeMalformedOpenAISse(): Promise<void> {
       }
     },
   );
-  console.log("openai sse ok: malformed JSON events are skipped");
+  console.log("openai sse ok: malformed JSON and non-text events are skipped");
 }
 
 async function smokeRetrievalBodyCaps(): Promise<void> {
