@@ -8,6 +8,9 @@ const githubIndexUrl =
   "https://github.com/openclaw/ask-molty/releases/download/workspace-latest/github-search.jsonl";
 const workspaceManifestUrl = "https://docs.openclaw.ai/ask-molty/workspace-manifest.json";
 const loadTextRetryDelaysMs = [150, 450];
+export const retrievalTimeouts = {
+  headerMs: 60_000,
+};
 export const maxWorkspaceTextBytes = 16_000_000;
 export const maxJsonlStreamBytes = 24_000_000;
 export const maxSourceRawChars = 12_000;
@@ -137,7 +140,7 @@ async function loadText(
   let lastError: unknown;
   for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
     try {
-      const response = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 300 } });
+      const response = await fetchWithHeaderTimeout(url);
       if (!response.ok) throw new Error(`Unable to load ${url}: ${response.status}`);
       const text = await readCappedText(response, url, maxWorkspaceTextBytes, "strict");
       if (text.startsWith("<!DOCTYPE html>") || text.length < minLength)
@@ -149,7 +152,7 @@ async function loadText(
       return text;
     } catch (error) {
       lastError = error;
-      if (isByteCapError(error)) break;
+      if (isByteCapError(error) || isTimeoutError(error)) break;
       const delay = retryDelaysMs[attempt];
       if (delay) await sleep(delay);
     }
@@ -158,9 +161,29 @@ async function loadText(
 }
 
 async function loadTextPrefix(url: string, maxBytes: number): Promise<string> {
-  const response = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 300 } });
+  const response = await fetchWithHeaderTimeout(url);
   if (!response.ok) throw new Error(`Unable to load ${url}: ${response.status}`);
   return readCappedText(response, url, maxBytes, "prefix");
+}
+
+async function fetchWithHeaderTimeout(url: string): Promise<Response> {
+  const controller = new AbortController();
+  const headerTimer = setTimeout(() => controller.abort(), retrievalTimeouts.headerMs);
+  try {
+    return await fetch(url, {
+      cf: { cacheEverything: true, cacheTtl: 300 },
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (isTimeoutError(error)) {
+      const timeout = new Error(`Unable to load ${url}: timed out`);
+      timeout.name = "TimeoutError";
+      throw timeout;
+    }
+    throw error;
+  } finally {
+    clearTimeout(headerTimer);
+  }
 }
 
 async function readCappedText(
@@ -208,6 +231,10 @@ function byteCapError(url: string, maxBytes: number): Error {
 
 function isByteCapError(error: unknown): boolean {
   return error instanceof Error && / exceeds \d+ bytes$/.test(error.message);
+}
+
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
 }
 
 function decodeUtf8(chunks: Uint8Array[]): string {
@@ -299,7 +326,7 @@ async function loadSearchSelection(
   }
 
   try {
-    const response = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 300 } });
+    const response = await fetchWithHeaderTimeout(url);
     if (!response.ok || !response.body)
       throw new Error(`Unable to load ${url}: ${response.status}`);
     const selection = await selectJsonlStream(response.body, kind, query, limit);

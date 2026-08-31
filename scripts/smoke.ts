@@ -10,6 +10,7 @@ import {
   maxSourceRawBytes,
   maxSourceRawChars,
   maxWorkspaceTextBytes,
+  retrievalTimeouts,
 } from "../src/retrieval";
 import type { Env } from "../src/types";
 import { openAI, openAITimeouts, streamAnswer } from "../src/worker";
@@ -27,6 +28,7 @@ smokeAuthRouting();
 await smokeOpenAIFetchTimeout();
 await smokeMalformedOpenAISse();
 await smokeRuntimeRetrieval();
+await smokeRetrievalFetchTimeout();
 await smokeRetrievalBodyCaps();
 
 if (process.env.ASK_MOLTY_SKIP_EXPORT_SMOKE === "1") {
@@ -216,6 +218,158 @@ async function smokeRuntimeRetrieval(): Promise<void> {
     },
   );
   console.log("runtime retrieval ok: docs outage keeps source and GitHub context");
+}
+
+async function smokeRetrievalFetchTimeout(): Promise<void> {
+  const docsIndexUrl = "https://example.test/docs-search.json";
+  const docsCorpusUrl = "https://example.test/llms-full.txt";
+  const sourceIndexUrl = "https://example.test/source-index.jsonl";
+  const githubIndexUrl = "https://example.test/github-search.jsonl";
+  const rawUrl = "https://example.test/raw/settings.ts";
+  const env: Env = {
+    OPENAI_API_KEY: "test",
+    DOCS_INDEX_URL: docsIndexUrl,
+    DOCS_CORPUS_URL: docsCorpusUrl,
+    SOURCE_INDEX_URL: sourceIndexUrl,
+    GITHUB_INDEX_URL: githubIndexUrl,
+  };
+  const docsIndex = JSON.stringify({
+    version: 1,
+    entries: [
+      {
+        title: "Settings",
+        url: "/settings",
+        snippet: "Settings implementation.",
+        search: "settings implementation issue ".repeat(80),
+      },
+    ],
+  });
+  const sourceIndex = `${JSON.stringify({
+    path: "src/settings.ts",
+    search: "settings implementation issue ".repeat(80),
+    rawUrl,
+    url: "https://github.com/openclaw/openclaw/blob/main/src/settings.ts",
+  })}\n`;
+  const githubIndex = `${JSON.stringify({
+    path: "/workspace/github/000.md#issue-123",
+    number: 123,
+    state: "open",
+    title: "Settings issue",
+    url: "https://github.com/openclaw/openclaw/issues/123",
+    search: "settings implementation issue ".repeat(80),
+  })}\n`;
+  const signals = new Map<string, AbortSignal | undefined>();
+
+  await withMockNetwork(
+    async (url, init) => {
+      signals.set(url, init?.signal ?? undefined);
+      if (url === docsIndexUrl) return new Response(docsIndex);
+      if (url === sourceIndexUrl) return new Response(sourceIndex);
+      if (url === githubIndexUrl) return new Response(githubIndex);
+      if (url === rawUrl) return new Response("export const settings = 1;\n");
+      return new Response("missing", { status: 404 });
+    },
+    async () => {
+      await buildWorkspace(env, "settings implementation issue");
+    },
+  );
+
+  for (const url of [docsIndexUrl, sourceIndexUrl, githubIndexUrl, rawUrl]) {
+    if (!(signals.get(url) instanceof AbortSignal)) {
+      throw new Error(`retrieval fetch timeout: ${url} has no AbortSignal`);
+    }
+  }
+  if (signals.has(docsCorpusUrl)) {
+    throw new Error("retrieval fetch timeout: docs corpus fetched despite a usable index");
+  }
+  console.log("retrieval fetch timeout ok: corpus, index, and rawUrl fetches pass AbortSignal");
+
+  const previousHeaderMs = retrievalTimeouts.headerMs;
+  retrievalTimeouts.headerMs = 20;
+  try {
+    await withMockNetwork(
+      async (_url, init) => hangUntilAborted(init),
+      async () => {
+        const started = Date.now();
+        const files = await Promise.race([
+          buildWorkspace(env, "settings implementation issue"),
+          new Promise<never>((_, reject) => {
+            setTimeout(
+              () => reject(new Error("retrieval fetch watchdog: request did not abort")),
+              1000,
+            );
+          }),
+        ]);
+        if (Date.now() - started > 500) {
+          throw new Error("retrieval fetch abort took too long");
+        }
+        if (!files.some((file) => file.path === "/workspace/docs/unavailable.md")) {
+          throw new Error("retrieval fetch timeout: hung indexes did not fail closed");
+        }
+        if (files.some((file) => file.kind === "source" || file.kind === "github")) {
+          throw new Error("retrieval fetch timeout: hung indexes still mounted source or GitHub");
+        }
+      },
+    );
+  } finally {
+    retrievalTimeouts.headerMs = previousHeaderMs;
+  }
+  console.log("retrieval fetch timeout ok: hung corpus and index fetches abort");
+
+  retrievalTimeouts.headerMs = 20;
+  try {
+    let rawHung = false;
+    await withMockNetwork(
+      async (url, init) => {
+        if (url === docsIndexUrl) return new Response(docsIndex);
+        if (url === sourceIndexUrl) return new Response(sourceIndex);
+        if (url === githubIndexUrl) return new Response(githubIndex);
+        if (url === rawUrl) {
+          rawHung = true;
+          return hangUntilAborted(init);
+        }
+        return new Response("missing", { status: 404 });
+      },
+      async () => {
+        const started = Date.now();
+        const files = await Promise.race([
+          buildWorkspace(env, "settings implementation issue"),
+          new Promise<never>((_, reject) => {
+            setTimeout(
+              () => reject(new Error("retrieval rawUrl watchdog: request did not abort")),
+              1000,
+            );
+          }),
+        ]);
+        if (!rawHung) throw new Error("retrieval fetch timeout: source rawUrl was not fetched");
+        if (Date.now() - started > 500) {
+          throw new Error("retrieval rawUrl fetch abort took too long");
+        }
+        if (!files.some((file) => file.kind === "source")) {
+          throw new Error("retrieval fetch timeout: hung rawUrl blocked source context");
+        }
+      },
+    );
+  } finally {
+    retrievalTimeouts.headerMs = previousHeaderMs;
+  }
+  console.log(
+    "retrieval fetch timeout ok: hung source rawUrl fetch aborts without blocking the mount",
+  );
+}
+
+function hangUntilAborted(init?: RequestInit): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    const signal = init?.signal;
+    if (!signal) return;
+    const fail = () => {
+      const error = new Error("The operation was aborted due to timeout");
+      error.name = "TimeoutError";
+      reject(error);
+    };
+    if (signal.aborted) fail();
+    else signal.addEventListener("abort", fail, { once: true });
+  });
 }
 
 async function smokeOpenAIFetchTimeout(): Promise<void> {
