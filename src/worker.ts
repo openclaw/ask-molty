@@ -16,6 +16,9 @@ export const openAITimeouts = {
   headerMs: 60_000,
   bodyIdleMs: 60_000,
 };
+export const oidcTimeouts = {
+  headerMs: 60_000,
+};
 const authCookieName = "ask_molty_session";
 const authCookieMaxAgeSeconds = 60 * 60 * 24 * 7;
 const artifactUrls: Record<string, string> = {
@@ -389,9 +392,15 @@ function openAITextStream(): TransformStream<Uint8Array, Uint8Array> {
       if (!line.startsWith("data:")) continue;
       const data = line.slice(5).trim();
       if (!data || data === "[DONE]") continue;
-      const parsed = JSON.parse(data) as OpenAIStreamChunk;
+      let parsed: OpenAIStreamChunk;
+      try {
+        parsed = JSON.parse(data) as OpenAIStreamChunk;
+      } catch {
+        continue;
+      }
+      if (!parsed || typeof parsed !== "object") continue;
       const content = parsed.choices?.[0]?.delta?.content;
-      if (!content) continue;
+      if (typeof content !== "string" || !content) continue;
       textBuffer += content;
       flushText(controller);
     }
@@ -776,18 +785,31 @@ async function oidcCallback(request: Request, env: Env): Promise<Response> {
   if (!returnTo) return authErrorPage("Invalid sign-in response.", 400);
   if (!env.OPENCLAW_ID_CLIENT_ID || !env.OPENCLAW_ID_CLIENT_SECRET)
     return authErrorPage("Sign-in is not configured.", 500);
-  const tokenResponse = await fetch(`${oidcIssuer(env)}/oauth2/token`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Authorization: `Basic ${btoa(`${env.OPENCLAW_ID_CLIENT_ID}:${env.OPENCLAW_ID_CLIENT_SECRET}`)}`,
-    },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: oidcRedirectUri(request),
-    }),
-  });
+  const controller = new AbortController();
+  const headerTimer = setTimeout(() => controller.abort(), oidcTimeouts.headerMs);
+  let tokenResponse: Response;
+  try {
+    tokenResponse = await fetch(`${oidcIssuer(env)}/oauth2/token`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Authorization: `Basic ${btoa(`${env.OPENCLAW_ID_CLIENT_ID}:${env.OPENCLAW_ID_CLIENT_SECRET}`)}`,
+      },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: oidcRedirectUri(request),
+      }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+      return authErrorPage("OpenClaw ID verification timed out. Please try again.", 504);
+    }
+    throw error;
+  } finally {
+    clearTimeout(headerTimer);
+  }
   if (!tokenResponse.ok) return authErrorPage("OpenClaw ID verification failed.", 401);
   let tokens: unknown;
   try {

@@ -10,9 +10,10 @@ import {
   maxSourceRawBytes,
   maxSourceRawChars,
   maxWorkspaceTextBytes,
+  retrievalTimeouts,
 } from "../src/retrieval";
 import type { Env } from "../src/types";
-import worker, { openAI, openAITimeouts, streamAnswer } from "../src/worker";
+import worker, { openAI, openAITimeouts, oidcTimeouts, streamAnswer } from "../src/worker";
 
 const root = process.cwd();
 const outDir = path.join(root, "dist", "test");
@@ -26,7 +27,10 @@ const required = [
 smokeAuthRouting();
 await smokeOpenAIFetchTimeout();
 await smokeOidcTokenJsonParse();
+await smokeOidcTokenFetchTimeout();
+await smokeMalformedOpenAISse();
 await smokeRuntimeRetrieval();
+await smokeRetrievalFetchTimeout();
 await smokeRetrievalBodyCaps();
 
 if (process.env.ASK_MOLTY_SKIP_EXPORT_SMOKE === "1") {
@@ -216,6 +220,158 @@ async function smokeRuntimeRetrieval(): Promise<void> {
     },
   );
   console.log("runtime retrieval ok: docs outage keeps source and GitHub context");
+}
+
+async function smokeRetrievalFetchTimeout(): Promise<void> {
+  const docsIndexUrl = "https://example.test/docs-search.json";
+  const docsCorpusUrl = "https://example.test/llms-full.txt";
+  const sourceIndexUrl = "https://example.test/source-index.jsonl";
+  const githubIndexUrl = "https://example.test/github-search.jsonl";
+  const rawUrl = "https://example.test/raw/settings.ts";
+  const env: Env = {
+    OPENAI_API_KEY: "test",
+    DOCS_INDEX_URL: docsIndexUrl,
+    DOCS_CORPUS_URL: docsCorpusUrl,
+    SOURCE_INDEX_URL: sourceIndexUrl,
+    GITHUB_INDEX_URL: githubIndexUrl,
+  };
+  const docsIndex = JSON.stringify({
+    version: 1,
+    entries: [
+      {
+        title: "Settings",
+        url: "/settings",
+        snippet: "Settings implementation.",
+        search: "settings implementation issue ".repeat(80),
+      },
+    ],
+  });
+  const sourceIndex = `${JSON.stringify({
+    path: "src/settings.ts",
+    search: "settings implementation issue ".repeat(80),
+    rawUrl,
+    url: "https://github.com/openclaw/openclaw/blob/main/src/settings.ts",
+  })}\n`;
+  const githubIndex = `${JSON.stringify({
+    path: "/workspace/github/000.md#issue-123",
+    number: 123,
+    state: "open",
+    title: "Settings issue",
+    url: "https://github.com/openclaw/openclaw/issues/123",
+    search: "settings implementation issue ".repeat(80),
+  })}\n`;
+  const signals = new Map<string, AbortSignal | undefined>();
+
+  await withMockNetwork(
+    async (url, init) => {
+      signals.set(url, init?.signal ?? undefined);
+      if (url === docsIndexUrl) return new Response(docsIndex);
+      if (url === sourceIndexUrl) return new Response(sourceIndex);
+      if (url === githubIndexUrl) return new Response(githubIndex);
+      if (url === rawUrl) return new Response("export const settings = 1;\n");
+      return new Response("missing", { status: 404 });
+    },
+    async () => {
+      await buildWorkspace(env, "settings implementation issue");
+    },
+  );
+
+  for (const url of [docsIndexUrl, sourceIndexUrl, githubIndexUrl, rawUrl]) {
+    if (!(signals.get(url) instanceof AbortSignal)) {
+      throw new Error(`retrieval fetch timeout: ${url} has no AbortSignal`);
+    }
+  }
+  if (signals.has(docsCorpusUrl)) {
+    throw new Error("retrieval fetch timeout: docs corpus fetched despite a usable index");
+  }
+  console.log("retrieval fetch timeout ok: corpus, index, and rawUrl fetches pass AbortSignal");
+
+  const previousHeaderMs = retrievalTimeouts.headerMs;
+  retrievalTimeouts.headerMs = 20;
+  try {
+    await withMockNetwork(
+      async (_url, init) => hangUntilAborted(init),
+      async () => {
+        const started = Date.now();
+        const files = await Promise.race([
+          buildWorkspace(env, "settings implementation issue"),
+          new Promise<never>((_, reject) => {
+            setTimeout(
+              () => reject(new Error("retrieval fetch watchdog: request did not abort")),
+              1000,
+            );
+          }),
+        ]);
+        if (Date.now() - started > 500) {
+          throw new Error("retrieval fetch abort took too long");
+        }
+        if (!files.some((file) => file.path === "/workspace/docs/unavailable.md")) {
+          throw new Error("retrieval fetch timeout: hung indexes did not fail closed");
+        }
+        if (files.some((file) => file.kind === "source" || file.kind === "github")) {
+          throw new Error("retrieval fetch timeout: hung indexes still mounted source or GitHub");
+        }
+      },
+    );
+  } finally {
+    retrievalTimeouts.headerMs = previousHeaderMs;
+  }
+  console.log("retrieval fetch timeout ok: hung corpus and index fetches abort");
+
+  retrievalTimeouts.headerMs = 20;
+  try {
+    let rawHung = false;
+    await withMockNetwork(
+      async (url, init) => {
+        if (url === docsIndexUrl) return new Response(docsIndex);
+        if (url === sourceIndexUrl) return new Response(sourceIndex);
+        if (url === githubIndexUrl) return new Response(githubIndex);
+        if (url === rawUrl) {
+          rawHung = true;
+          return hangUntilAborted(init);
+        }
+        return new Response("missing", { status: 404 });
+      },
+      async () => {
+        const started = Date.now();
+        const files = await Promise.race([
+          buildWorkspace(env, "settings implementation issue"),
+          new Promise<never>((_, reject) => {
+            setTimeout(
+              () => reject(new Error("retrieval rawUrl watchdog: request did not abort")),
+              1000,
+            );
+          }),
+        ]);
+        if (!rawHung) throw new Error("retrieval fetch timeout: source rawUrl was not fetched");
+        if (Date.now() - started > 500) {
+          throw new Error("retrieval rawUrl fetch abort took too long");
+        }
+        if (!files.some((file) => file.kind === "source")) {
+          throw new Error("retrieval fetch timeout: hung rawUrl blocked source context");
+        }
+      },
+    );
+  } finally {
+    retrievalTimeouts.headerMs = previousHeaderMs;
+  }
+  console.log(
+    "retrieval fetch timeout ok: hung source rawUrl fetch aborts without blocking the mount",
+  );
+}
+
+function hangUntilAborted(init?: RequestInit): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    const signal = init?.signal;
+    if (!signal) return;
+    const fail = () => {
+      const error = new Error("The operation was aborted due to timeout");
+      error.name = "TimeoutError";
+      reject(error);
+    };
+    if (signal.aborted) fail();
+    else signal.addEventListener("abort", fail, { once: true });
+  });
 }
 
 async function smokeOpenAIFetchTimeout(): Promise<void> {
@@ -501,6 +657,102 @@ async function smokeOidcTokenJsonParse(): Promise<void> {
   console.log("oidc token json parse ok: invalid JSON and token shapes return authErrorPage");
 }
 
+async function smokeOidcTokenFetchTimeout(): Promise<void> {
+  const env: Env = {
+    OPENAI_API_KEY: "test",
+    ASK_MOLTY_AUTH_SECRET: "test-oidc-secret",
+    OPENCLAW_ID_CLIENT_ID: "molty-client",
+    OPENCLAW_ID_CLIENT_SECRET: "molty-secret",
+    OPENCLAW_ID_ISSUER: "https://id.example.test/api/auth",
+  };
+  const tokenUrl = `${env.OPENCLAW_ID_ISSUER}/oauth2/token`;
+  const state = await signedOidcState("test-oidc-secret", "https://docs.openclaw.ai/install");
+  const request = new Request(
+    `https://docs.openclaw.ai/ask-molty/auth/oidc-callback?code=test-code&state=${state}`,
+  );
+
+  const signals: Array<AbortSignal | undefined> = [];
+  await withMockNetwork(
+    async (url, init) => {
+      if (url !== tokenUrl) return new Response("missing", { status: 404 });
+      signals.push(init?.signal ?? undefined);
+      return Response.json({ id_token: fakeIdToken("user@example.com") });
+    },
+    async () => {
+      const response = await worker.fetch(request, env);
+      if (response.status !== 302) {
+        throw new Error(
+          `OIDC token fetch: expected 302 after token exchange, got ${response.status}`,
+        );
+      }
+    },
+  );
+  if (signals.length !== 1) {
+    throw new Error(`OIDC token fetch: expected 1 token fetch, got ${signals.length}`);
+  }
+  if (!(signals[0] instanceof AbortSignal)) {
+    throw new Error("OIDC token fetch: token exchange has no AbortSignal");
+  }
+  console.log("oidc token fetch timeout ok: token exchange passes AbortSignal");
+
+  const previousHeaderMs = oidcTimeouts.headerMs;
+  oidcTimeouts.headerMs = 20;
+  try {
+    await withMockNetwork(
+      async (url, init) => {
+        if (url !== tokenUrl) return new Response("missing", { status: 404 });
+        return new Promise((_resolve, reject) => {
+          const signal = init?.signal;
+          if (!signal) return;
+          const fail = () => {
+            const error = new Error("The operation was aborted due to timeout");
+            error.name = "TimeoutError";
+            reject(error);
+          };
+          if (signal.aborted) fail();
+          else signal.addEventListener("abort", fail, { once: true });
+        });
+      },
+      async () => {
+        const started = Date.now();
+        let response: Response;
+        try {
+          response = await Promise.race([
+            worker.fetch(request, env),
+            new Promise<Response>((_, reject) => {
+              setTimeout(
+                () => reject(new Error("OIDC token fetch watchdog: request did not abort")),
+                1000,
+              );
+            }),
+          ]);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (message.includes("watchdog")) throw error;
+          throw new Error(`OIDC token fetch abort escaped as ${message}`);
+        }
+        if (response.status !== 504) {
+          throw new Error(
+            `OIDC hung token fetch: expected authErrorPage 504, got ${response.status}`,
+          );
+        }
+        const body = await response.text();
+        if (!body.includes("OpenClaw ID verification timed out")) {
+          throw new Error(
+            `OIDC hung token fetch: authErrorPage missing timeout copy: ${body.slice(0, 200)}`,
+          );
+        }
+        if (Date.now() - started > 500) {
+          throw new Error("OIDC token fetch abort took too long");
+        }
+      },
+    );
+  } finally {
+    oidcTimeouts.headerMs = previousHeaderMs;
+  }
+  console.log("oidc token fetch timeout ok: hung token exchange aborts to authErrorPage");
+}
+
 async function signedOidcState(secret: string, returnTo: string): Promise<string> {
   const encoded = base64UrlEncode(
     JSON.stringify({ r: returnTo, exp: Math.floor(Date.now() / 1000) + 600 }),
@@ -516,6 +768,10 @@ async function signedOidcState(secret: string, returnTo: string): Promise<string
   return `${encoded}.${base64UrlEncodeBytes(new Uint8Array(signature))}`;
 }
 
+function fakeIdToken(email: string): string {
+  return `hdr.${base64UrlEncode(JSON.stringify({ email, sub: email }))}.sig`;
+}
+
 function base64UrlEncode(value: string): string {
   return base64UrlEncodeBytes(new TextEncoder().encode(value));
 }
@@ -524,6 +780,59 @@ function base64UrlEncodeBytes(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function smokeMalformedOpenAISse(): Promise<void> {
+  const env: Env = { OPENAI_API_KEY: "test" };
+  const messages = [{ role: "user" as const, content: "ping" }];
+  const encoder = new TextEncoder();
+
+  await withMockNetwork(
+    async (url) => {
+      if (!url.includes("api.openai.com/v1/chat/completions")) {
+        return new Response("missing", { status: 404 });
+      }
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode('data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'),
+            );
+            controller.enqueue(encoder.encode("data: {not-valid-json\n\n"));
+            for (const payload of [
+              null,
+              false,
+              42,
+              "not a chunk",
+              { choices: [{ delta: { content: { text: "not text" } } }] },
+            ]) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+            }
+            controller.enqueue(
+              encoder.encode('data: {"choices":[{"delta":{"content":" world"}}]}\n\n'),
+            );
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+          },
+        }),
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+    },
+    async () => {
+      const stream = await streamAnswer(env, messages);
+      let text = "";
+      try {
+        text = await new Response(stream).text();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`OpenAI SSE: malformed JSON aborted the stream: ${message}`);
+      }
+      if (text !== "Hello world") {
+        throw new Error(`OpenAI SSE: expected "Hello world", got ${JSON.stringify(text)}`);
+      }
+    },
+  );
+  console.log("openai sse ok: malformed JSON and non-text events are skipped");
 }
 
 async function smokeRetrievalBodyCaps(): Promise<void> {
