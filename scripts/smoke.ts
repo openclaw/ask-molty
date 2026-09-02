@@ -13,7 +13,14 @@ import {
   retrievalTimeouts,
 } from "../src/retrieval";
 import type { Env } from "../src/types";
-import worker, { openAI, openAITimeouts, oidcTimeouts, streamAnswer } from "../src/worker";
+import worker, {
+  artifactTimeouts,
+  artifactUrls,
+  openAI,
+  openAITimeouts,
+  oidcTimeouts,
+  streamAnswer,
+} from "../src/worker";
 
 const root = process.cwd();
 const outDir = path.join(root, "dist", "test");
@@ -28,6 +35,7 @@ smokeAuthRouting();
 await smokeOpenAIFetchTimeout();
 await smokeOidcTokenJsonParse();
 await smokeOidcTokenFetchTimeout();
+await smokeArtifactFetchTimeout();
 await smokeMalformedOpenAISse();
 await smokeRuntimeRetrieval();
 await smokeRetrievalFetchTimeout();
@@ -751,6 +759,80 @@ async function smokeOidcTokenFetchTimeout(): Promise<void> {
     oidcTimeouts.headerMs = previousHeaderMs;
   }
   console.log("oidc token fetch timeout ok: hung token exchange aborts to authErrorPage");
+}
+
+async function smokeArtifactFetchTimeout(): Promise<void> {
+  const env: Env = { OPENAI_API_KEY: "test" };
+  const artifactPath = "/ask-molty/github-search.jsonl";
+  const artifactUrl = artifactUrls[artifactPath] ?? "";
+  const request = new Request(`https://docs.openclaw.ai${artifactPath}`);
+
+  const signals: Array<AbortSignal | undefined> = [];
+  await withMockNetwork(
+    async (url, init) => {
+      if (url !== artifactUrl) return new Response("missing", { status: 404 });
+      signals.push(init?.signal ?? undefined);
+      return new Response('{"ok":true}\n', {
+        headers: { "Content-Type": "application/x-ndjson" },
+      });
+    },
+    async () => {
+      const response = await worker.fetch(request, env);
+      if (response.status !== 200) {
+        throw new Error(`artifact fetch: expected 200, got ${response.status}`);
+      }
+    },
+  );
+  if (signals.length !== 1) {
+    throw new Error(`artifact fetch: expected 1 upstream fetch, got ${signals.length}`);
+  }
+  if (!(signals[0] instanceof AbortSignal)) {
+    throw new Error("artifact fetch: upstream fetch has no AbortSignal");
+  }
+  console.log("artifact fetch timeout ok: proxy fetch passes AbortSignal");
+
+  const previousHeaderMs = artifactTimeouts.headerMs;
+  artifactTimeouts.headerMs = 20;
+  try {
+    await withMockNetwork(
+      async (url, init) => {
+        if (url !== artifactUrl) return new Response("missing", { status: 404 });
+        return hangUntilAborted(init);
+      },
+      async () => {
+        const started = Date.now();
+        let response: Response;
+        try {
+          response = await Promise.race([
+            worker.fetch(request, env),
+            new Promise<Response>((_, reject) => {
+              setTimeout(
+                () => reject(new Error("artifact fetch watchdog: request did not abort")),
+                1000,
+              );
+            }),
+          ]);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (message.includes("watchdog")) throw error;
+          throw new Error(`artifact fetch abort escaped as ${message}`);
+        }
+        if (response.status !== 504) {
+          throw new Error(`hung artifact fetch: expected 504, got ${response.status}`);
+        }
+        const body = await response.text();
+        if (!body.includes("timed out")) {
+          throw new Error(`hung artifact fetch: missing timeout copy: ${body.slice(0, 200)}`);
+        }
+        if (Date.now() - started > 500) {
+          throw new Error("artifact fetch abort took too long");
+        }
+      },
+    );
+  } finally {
+    artifactTimeouts.headerMs = previousHeaderMs;
+  }
+  console.log("artifact fetch timeout ok: hung proxy fetch aborts to 504");
 }
 
 async function signedOidcState(secret: string, returnTo: string): Promise<string> {
