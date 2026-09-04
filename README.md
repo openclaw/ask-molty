@@ -64,6 +64,11 @@ npm run export
 
 The generated workspace can be large because GitHub threads are sharded into markdown files. The Worker never downloads all of it per request; it loads small JSONL indexes, selects candidates, and only mounts the best matching docs/source/GitHub files.
 
+The public `/ask-molty/github-search.jsonl` proxy gives uncached upstream requests
+60 seconds to return headers. A header timeout returns HTTP 504 with public CORS
+headers so browser clients can read the failure and retry. The deadline ends when
+headers arrive; it does not limit the artifact body's download time.
+
 ## Deploy
 
 The Worker expects `OPENAI_API_KEY` as a Cloudflare Worker secret. The default model is `chat-latest`, which OpenAI maps to GPT-5.5 Instant in the API.
