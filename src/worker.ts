@@ -101,7 +101,10 @@ async function serveArtifact(request: Request, url: string): Promise<Response> {
     });
   } catch (error) {
     if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
-      return new Response("Artifact unavailable: timed out", { status: 504 });
+      return new Response(request.method === "HEAD" ? null : "Artifact unavailable: timed out", {
+        status: 504,
+        headers: { "Access-Control-Allow-Origin": "*" },
+      });
     }
     throw error;
   } finally {
