@@ -19,9 +19,12 @@ export const openAITimeouts = {
 export const oidcTimeouts = {
   headerMs: 60_000,
 };
+export const artifactTimeouts = {
+  headerMs: 60_000,
+};
 const authCookieName = "ask_molty_session";
 const authCookieMaxAgeSeconds = 60 * 60 * 24 * 7;
-const artifactUrls: Record<string, string> = {
+export const artifactUrls: Record<string, string> = {
   "/ask-molty/github-search.jsonl":
     "https://github.com/openclaw/ask-molty/releases/download/workspace-latest/github-search.jsonl",
 };
@@ -88,7 +91,25 @@ async function serveArtifact(request: Request, url: string): Promise<Response> {
   const cached = await cache.match(cacheKey);
   if (cached) return request.method === "HEAD" ? new Response(null, cached) : cached;
 
-  const upstream = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 3600 } });
+  const controller = new AbortController();
+  const headerTimer = setTimeout(() => controller.abort(), artifactTimeouts.headerMs);
+  let upstream: Response;
+  try {
+    upstream = await fetch(url, {
+      cf: { cacheEverything: true, cacheTtl: 3600 },
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+      return new Response(request.method === "HEAD" ? null : "Artifact unavailable: timed out", {
+        status: 504,
+        headers: { "Access-Control-Allow-Origin": "*" },
+      });
+    }
+    throw error;
+  } finally {
+    clearTimeout(headerTimer);
+  }
   if (!upstream.ok)
     return new Response(`Artifact unavailable: ${upstream.status}`, { status: 502 });
   const headers = new Headers(upstream.headers);
