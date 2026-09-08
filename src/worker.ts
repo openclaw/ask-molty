@@ -224,9 +224,14 @@ function compactGithubLinks(text: string): string {
       (_match, prefix: string, sha: string, path: string) => {
         const cleanPath = trimTrailingPunctuation(path);
         const suffix = path.slice(cleanPath.length);
-        const label = decodeURIComponent(cleanPath).replace(
-          /#L(\d+)(?:-L(\d+))?$/,
-          (_line, from, to) => (to ? `:L${from}-L${to}` : `:L${from}`),
+        let label = cleanPath;
+        try {
+          label = decodeURIComponent(cleanPath);
+        } catch (error) {
+          if (!(error instanceof URIError)) throw error;
+        }
+        label = label.replace(/#L(\d+)(?:-L(\d+))?$/, (_line, from, to) =>
+          to ? `:L${from}-L${to}` : `:L${from}`,
         );
         return `${prefix}[${label}](https://github.com/openclaw/openclaw/blob/${sha}/${cleanPath})${suffix}`;
       },

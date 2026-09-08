@@ -38,6 +38,9 @@ The Worker does deterministic candidate retrieval, mounts the best docs/source/G
 
 Docs are canonical. Source is implementation truth. GitHub issues/PRs are discussion and status evidence.
 
+Streamed answers compact GitHub citations into readable links. If a source path has
+malformed percent encoding, its label keeps the raw path and the answer continues.
+
 `run_shell` is deliberately fake and read-only. It supports `rg`, `grep`, `cat`, `head`, `ls`, and `find` over mounted files only. No pipes, redirects, writes, network, or process execution.
 
 ## Local Build

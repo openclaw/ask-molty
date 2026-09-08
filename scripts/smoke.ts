@@ -38,6 +38,7 @@ await smokeOidcTokenJsonParse();
 await smokeOidcTokenFetchTimeout();
 await smokeArtifactFetchTimeout();
 await smokeMalformedOpenAISse();
+await smokeMalformedGithubBlobPercent();
 await smokeRuntimeRetrieval();
 await smokeRetrievalFetchTimeout();
 await smokeRetrievalBodyCaps();
@@ -960,6 +961,72 @@ async function smokeMalformedOpenAISse(): Promise<void> {
     },
   );
   console.log("openai sse ok: malformed JSON and non-text events are skipped");
+}
+
+async function smokeMalformedGithubBlobPercent(): Promise<void> {
+  const env: Env = { OPENAI_API_KEY: "test" };
+  const messages = [{ role: "user" as const, content: "ping" }];
+  const encoder = new TextEncoder();
+  const truncated = "https://github.com/openclaw/openclaw/blob/abc1234/src/foo%";
+  const invalidHex = "https://github.com/openclaw/openclaw/blob/abc1234/src/%ZZ";
+  const invalidUtf8 = "https://github.com/openclaw/openclaw/blob/abc1234/src/%E0%A4#L2-L4";
+  const encoded = "https://github.com/openclaw/openclaw/blob/abc1234/src/foo%20bar.ts#L3";
+
+  await withMockNetwork(
+    async (url) => {
+      if (!url.includes("api.openai.com/v1/chat/completions")) {
+        return new Response("missing", { status: 404 });
+      }
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode('data: {"choices":[{"delta":{"content":"Hello "}}]}\n\n'),
+            );
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({
+                  choices: [
+                    {
+                      delta: {
+                        content: `${truncated} ${invalidHex} ${invalidUtf8} ${encoded} done`,
+                      },
+                    },
+                  ],
+                })}\n\n`,
+              ),
+            );
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+          },
+        }),
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+    },
+    async () => {
+      const stream = await streamAnswer(env, messages);
+      let text = "";
+      try {
+        text = await new Response(stream).text();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`github blob compact: malformed percent aborted the stream: ${message}`);
+      }
+      const expected =
+        "Hello [src/foo%](https://github.com/openclaw/openclaw/blob/abc1234/src/foo%) " +
+        "[src/%ZZ](https://github.com/openclaw/openclaw/blob/abc1234/src/%ZZ) " +
+        "[src/%E0%A4:L2-L4](https://github.com/openclaw/openclaw/blob/abc1234/src/%E0%A4#L2-L4) " +
+        "[src/foo bar.ts:L3](https://github.com/openclaw/openclaw/blob/abc1234/src/foo%20bar.ts#L3) done";
+      if (text !== expected) {
+        throw new Error(
+          `github blob compact: expected ${JSON.stringify(expected)}, got ${JSON.stringify(text)}`,
+        );
+      }
+    },
+  );
+  console.log(
+    "github blob compact ok: truncated percent sequences keep the raw path and finish the stream",
+  );
 }
 
 async function smokeRetrievalBodyCaps(): Promise<void> {
