@@ -73,14 +73,15 @@ headers arrive; it does not limit the artifact body's download time.
 
 The Worker expects `OPENAI_API_KEY` as a Cloudflare Worker secret. The default model is `chat-latest`, which OpenAI maps to GPT-5.5 Instant in the API.
 
-Docs chat auth is brokered through ClawHub:
+Docs chat signs in through OpenClaw ID:
 
-- `CLAWHUB_AUTH_URL` sends users to `https://clawhub.ai/auth/docs`.
-- Both `docs.clawhub.ai` and `docs.openclaw.ai` use the same Worker and ClawHub auth flow.
+- `OPENCLAW_ID_ISSUER` defaults to `https://id.openclaw.ai`.
+- Set `OPENCLAW_ID_CLIENT_ID` and the `OPENCLAW_ID_CLIENT_SECRET` Worker secret for the registered confidential client.
+- Register `/ask-molty/auth/oidc-callback` on each supported docs host as a redirect URI. Sessions are scoped to the host where sign-in completes.
+- Both `docs.clawhub.ai` and `docs.openclaw.ai` use the same Worker and OpenClaw ID flow; existing GitHub session cookies remain valid until they expire.
 - OpenClaw docs and source retrieval read from the durable `openclaw-docs` R2 bucket, with the
   public docs host as fallback.
-- `CLAWHUB_SESSION_VERIFY_URL` verifies the ClawHub Convex Auth token once.
-- `ASK_MOLTY_AUTH_SECRET` signs the docs-only session cookie; set it in production so OpenAI key rotation does not invalidate sessions.
+- Set `ASK_MOLTY_AUTH_SECRET` as a Worker secret to sign docs-only session cookies and sign-in state. It is required outside local development.
 
 ```bash
 npm run deploy
