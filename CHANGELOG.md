@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.2.0 - 2026-09-14
 
 **Highlights:** More reliable streamed answers, recovery from stalled requests, and OpenClaw ID sign-in.
