@@ -38,6 +38,10 @@ The Worker does deterministic candidate retrieval, mounts the best docs/source/G
 
 Docs are canonical. Source is implementation truth. GitHub issues/PRs are discussion and status evidence.
 
+GitHub URLs returned by workspace search and listing can be passed directly to
+`read_workspace`. Retrieval processes JSONL records independently of network chunk
+sizes, within the existing index byte and unfinished-line limits.
+
 Streamed answers compact GitHub citations into readable links. If a source path has
 malformed percent encoding, its label keeps the raw path and the answer continues.
 

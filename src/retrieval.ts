@@ -115,7 +115,11 @@ export function searchWorkspace(
 
 export function readWorkspace(files: WorkspaceFile[], path: string): WorkspaceFile | undefined {
   const normalized = normalizeWorkspacePath(path);
-  return files.find((file) => normalizeWorkspacePath(file.path) === normalized);
+  return files.find(
+    (file) =>
+      (file.kind === "github" && file.url === path) ||
+      normalizeWorkspacePath(file.path) === normalized,
+  );
 }
 
 export function workspaceContext(files: WorkspaceFile[]): string {
@@ -478,11 +482,7 @@ async function selectJsonlStream(
       const chunk = value.subarray(0, remainingBytes);
       totalBytes += chunk.byteLength;
       buffer += decoder.decode(chunk, { stream: true });
-      if (
-        value.byteLength > remainingBytes ||
-        totalBytes === maxJsonlStreamBytes ||
-        buffer.length > 1_048_576
-      ) {
+      if (value.byteLength > remainingBytes || totalBytes === maxJsonlStreamBytes) {
         const lines = buffer.split("\n");
         lines.pop();
         for (const line of lines) processLine(line);
@@ -492,6 +492,11 @@ async function selectJsonlStream(
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
       for (const line of lines) processLine(line);
+      // Limit the unfinished line, not a chunk containing many complete records.
+      if (buffer.length > 1_048_576) {
+        buffer = "";
+        break;
+      }
     }
     if (buffer) {
       buffer += decoder.decode();
