@@ -17,7 +17,7 @@ export const openAITimeouts = {
   bodyIdleMs: 60_000,
 };
 export const oidcTimeouts = {
-  headerMs: 60_000,
+  requestMs: 60_000,
 };
 export const artifactTimeouts = {
   headerMs: 60_000,
@@ -162,7 +162,10 @@ Use workspace tools if you need to search or read exact files before answering.`
 function runTool(workspace: WorkspaceFile[], name: string, rawArgs: string): unknown {
   let args: Record<string, unknown> = {};
   try {
-    args = JSON.parse(rawArgs) as Record<string, unknown>;
+    const parsed: unknown = JSON.parse(rawArgs);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return { error: "tool arguments must be a JSON object" };
+    args = parsed as Record<string, unknown>;
   } catch {
     return { error: "invalid JSON arguments" };
   }
@@ -812,10 +815,10 @@ async function oidcCallback(request: Request, env: Env): Promise<Response> {
   if (!env.OPENCLAW_ID_CLIENT_ID || !env.OPENCLAW_ID_CLIENT_SECRET)
     return authErrorPage("Sign-in is not configured.", 500);
   const controller = new AbortController();
-  const headerTimer = setTimeout(() => controller.abort(), oidcTimeouts.headerMs);
-  let tokenResponse: Response;
+  const requestTimer = setTimeout(() => controller.abort(), oidcTimeouts.requestMs);
+  let tokens: unknown;
   try {
-    tokenResponse = await fetch(`${oidcIssuer(env)}/oauth2/token`, {
+    const tokenResponse = await fetch(`${oidcIssuer(env)}/oauth2/token`, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -828,20 +831,23 @@ async function oidcCallback(request: Request, env: Env): Promise<Response> {
       }),
       signal: controller.signal,
     });
+    if (!tokenResponse.ok) return authErrorPage("OpenClaw ID verification failed.", 401);
+    try {
+      tokens = await tokenResponse.json();
+    } catch (error) {
+      if (controller.signal.aborted) throw error;
+      return authErrorPage("OpenClaw ID verification failed.", 401);
+    }
   } catch (error) {
-    if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+    if (
+      controller.signal.aborted ||
+      (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))
+    ) {
       return authErrorPage("OpenClaw ID verification timed out. Please try again.", 504);
     }
     throw error;
   } finally {
-    clearTimeout(headerTimer);
-  }
-  if (!tokenResponse.ok) return authErrorPage("OpenClaw ID verification failed.", 401);
-  let tokens: unknown;
-  try {
-    tokens = await tokenResponse.json();
-  } catch {
-    return authErrorPage("OpenClaw ID verification failed.", 401);
+    clearTimeout(requestTimer);
   }
   // The id_token arrives directly from the issuer over TLS on an
   // authenticated confidential-client exchange, so decoding without local

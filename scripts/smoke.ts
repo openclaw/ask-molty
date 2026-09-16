@@ -4,6 +4,7 @@
 import fs from "node:fs";
 import assert from "node:assert/strict";
 import path from "node:path";
+import { createHmac } from "node:crypto";
 import { normalizeDocsReturnTo } from "../src/auth";
 import {
   buildWorkspace,
@@ -35,6 +36,8 @@ const required = [
 ];
 
 smokeAuthRouting();
+await smokeInvalidToolArguments();
+await smokeOidcTokenBodyTimeout();
 smokeWorkspaceIdentifiers();
 await smokeJsonlChunkBoundaries();
 await smokeOpenAIFetchTimeout();
@@ -71,6 +74,132 @@ if (process.env.ASK_MOLTY_SKIP_EXPORT_SMOKE === "1") {
     throw new Error("github index missing OpenClaw links");
 
   console.log(`ask-molty smoke ok: ${fileCount} workspace files`);
+}
+
+async function smokeInvalidToolArguments(): Promise<void> {
+  const secret = "synthetic-tool-secret";
+  const payload = base64UrlEncode(
+    JSON.stringify({
+      provider: "openclaw-id",
+      sub: "fixture@example.test",
+      exp: Date.now() / 1000 + 60,
+    }),
+  );
+  const cookie = `${payload}.${createHmac("sha256", secret).update(payload).digest("base64url")}`;
+  const invalidArguments = ["null", "[]", '"text"', "42", "true", "{broken"];
+  const names = ["search_workspace", "read_workspace", "list_workspace", "run_shell"];
+  let rounds = 0;
+  await withMockNetwork(
+    async (url, init) => {
+      if (url.endsWith("/docs-search.json"))
+        return Response.json({ entries: [{ url: "/fixture", search: "fixture ".repeat(150) }] });
+      if (!url.includes("api.openai.com")) return new Response("");
+      const body = JSON.parse(String(init?.body));
+      if (body.stream)
+        return new Response('data: {"choices":[{"delta":{"content":"Recovered"}}]}\n\n');
+      rounds += 1;
+      if (rounds === 1) {
+        return Response.json({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: names.flatMap((name) =>
+                  invalidArguments.map((args, index) => ({
+                    id: `${name}-${index}`,
+                    type: "function",
+                    function: { name, arguments: args },
+                  })),
+                ),
+              },
+            },
+          ],
+        });
+      }
+      const results = body.messages.filter((message: { role: string }) => message.role === "tool");
+      assert.equal(results.length, names.length * invalidArguments.length);
+      for (const result of results) assert.match(JSON.parse(result.content).error, /arguments/);
+      return Response.json({ choices: [{ message: { role: "assistant", content: "done" } }] });
+    },
+    async () => {
+      const response = await worker.fetch(
+        new Request("https://docs.openclaw.ai/ask-molty/api/chat", {
+          method: "POST",
+          headers: { Origin: "https://docs.openclaw.ai", Cookie: `ask_molty_session=${cookie}` },
+          body: JSON.stringify({ message: "fixture" }),
+        }),
+        { OPENAI_API_KEY: "test", ASK_MOLTY_AUTH_SECRET: secret },
+      );
+      assert.equal(response.status, 200, await response.clone().text());
+      assert.equal(await response.text(), "Recovered");
+      assert.equal(rounds, 2);
+    },
+  );
+  console.log(
+    "tool arguments ok: malformed JSON and non-object arguments return recoverable errors",
+  );
+}
+
+async function smokeOidcTokenBodyTimeout(): Promise<void> {
+  const secret = "test-oidc-secret";
+  const state = await signedOidcState(secret, "https://docs.openclaw.ai/install");
+  const previousTimeout = oidcTimeouts.requestMs;
+  oidcTimeouts.requestMs = 30;
+  let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  let aborted = false;
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await withMockNetwork(
+      async (_url, init) =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              bodyController = controller;
+              controller.enqueue(new TextEncoder().encode("{"));
+              init?.signal?.addEventListener(
+                "abort",
+                () => {
+                  aborted = true;
+                  controller.error(new DOMException("Synthetic abort", "AbortError"));
+                },
+                { once: true },
+              );
+            },
+          }),
+        ),
+      async () => {
+        const response = await Promise.race([
+          worker.fetch(
+            new Request(
+              `https://docs.openclaw.ai/ask-molty/auth/oidc-callback?code=fixture&state=${state}`,
+            ),
+            {
+              OPENAI_API_KEY: "test",
+              ASK_MOLTY_AUTH_SECRET: secret,
+              OPENCLAW_ID_CLIENT_ID: "fixture",
+              OPENCLAW_ID_CLIENT_SECRET: "fixture",
+            },
+          ),
+          new Promise<Response>((_resolve, reject) => {
+            watchdog = setTimeout(
+              () => reject(new Error("OIDC body watchdog: response still pending")),
+              500,
+            );
+          }),
+        ]);
+        assert.equal(response.status, 504);
+        assert.match(await response.text(), /OpenClaw ID verification timed out/);
+        assert.equal(response.headers.get("set-cookie"), null);
+        assert.equal(aborted, true);
+      },
+    );
+  } finally {
+    clearTimeout(watchdog);
+    bodyController?.error(new Error("test cleanup"));
+    oidcTimeouts.requestMs = previousTimeout;
+  }
+  console.log("OIDC body timeout ok: stalled token body aborts without creating a session");
 }
 
 function smokeWorkspaceIdentifiers(): void {
@@ -766,8 +895,8 @@ async function smokeOidcTokenFetchTimeout(): Promise<void> {
   }
   console.log("oidc token fetch timeout ok: token exchange passes AbortSignal");
 
-  const previousHeaderMs = oidcTimeouts.headerMs;
-  oidcTimeouts.headerMs = 20;
+  const previousRequestMs = oidcTimeouts.requestMs;
+  oidcTimeouts.requestMs = 20;
   try {
     await withMockNetwork(
       async (url, init) => {
@@ -819,7 +948,7 @@ async function smokeOidcTokenFetchTimeout(): Promise<void> {
       },
     );
   } finally {
-    oidcTimeouts.headerMs = previousHeaderMs;
+    oidcTimeouts.requestMs = previousRequestMs;
   }
   console.log("oidc token fetch timeout ok: hung token exchange aborts to authErrorPage");
 }

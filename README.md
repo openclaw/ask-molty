@@ -47,6 +47,9 @@ malformed percent encoding, its label keeps the raw path and the answer continue
 
 `run_shell` is deliberately fake and read-only. It supports `rg`, `grep`, `cat`, `head`, `ls`, and `find` over mounted files only. No pipes, redirects, writes, network, or process execution.
 
+Malformed JSON or non-object tool arguments return a tool error so the model can
+recover and continue the answer.
+
 ## Local Build
 
 ```bash
@@ -89,6 +92,10 @@ Docs chat signs in through OpenClaw ID:
 - OpenClaw docs and source retrieval read from the durable `openclaw-docs` R2 bucket, with the
   public docs host as fallback.
 - Set `ASK_MOLTY_AUTH_SECRET` as a Worker secret to sign docs-only session cookies and sign-in state. It is required outside local development.
+
+OpenClaw ID token exchanges have a 60-second deadline covering both response
+headers and the token body. A stalled exchange shows a retryable verification
+timeout without creating a session.
 
 ```bash
 npm run deploy

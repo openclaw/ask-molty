@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Recover from non-object model tool arguments and time out stalled OpenClaw ID token bodies instead of leaving sign-in pending.
 - Read GitHub search results by their displayed URLs and preserve later JSONL records when indexes arrive in large network chunks.
 
 ## 0.2.0 - 2026-09-14
