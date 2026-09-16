@@ -91,9 +91,9 @@ async function smokeInvalidToolArguments(): Promise<void> {
   let rounds = 0;
   await withMockNetwork(
     async (url, init) => {
-      if (url.endsWith("/docs-search.json"))
+      if (url === "https://docs.openclaw.ai/docs-search.json")
         return Response.json({ entries: [{ url: "/fixture", search: "fixture ".repeat(150) }] });
-      if (!url.includes("api.openai.com")) return new Response("");
+      if (url !== "https://api.openai.com/v1/chat/completions") return new Response("");
       const body = JSON.parse(String(init?.body));
       if (body.stream)
         return new Response('data: {"choices":[{"delta":{"content":"Recovered"}}]}\n\n');
