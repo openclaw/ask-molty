@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Read GitHub search results by their displayed URLs and preserve later JSONL records when indexes arrive in large network chunks.
+
 ## 0.2.0 - 2026-09-14
 
 **Highlights:** More reliable streamed answers, recovery from stalled requests, and OpenClaw ID sign-in.

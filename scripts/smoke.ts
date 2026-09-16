@@ -11,9 +11,11 @@ import {
   maxSourceRawBytes,
   maxSourceRawChars,
   maxWorkspaceTextBytes,
+  readWorkspace,
   retrievalTimeouts,
+  searchWorkspace,
 } from "../src/retrieval";
-import type { Env } from "../src/types";
+import type { Env, WorkspaceFile } from "../src/types";
 import worker, {
   artifactTimeouts,
   artifactUrls,
@@ -33,6 +35,8 @@ const required = [
 ];
 
 smokeAuthRouting();
+smokeWorkspaceIdentifiers();
+await smokeJsonlChunkBoundaries();
 await smokeOpenAIFetchTimeout();
 await smokeOidcTokenJsonParse();
 await smokeOidcTokenFetchTimeout();
@@ -67,6 +71,63 @@ if (process.env.ASK_MOLTY_SKIP_EXPORT_SMOKE === "1") {
     throw new Error("github index missing OpenClaw links");
 
   console.log(`ask-molty smoke ok: ${fileCount} workspace files`);
+}
+
+function smokeWorkspaceIdentifiers(): void {
+  const files: WorkspaceFile[] = [
+    {
+      path: "/workspace/github/issue-123.md",
+      kind: "github",
+      url: "https://github.com/openclaw/openclaw/issues/123",
+      content: "Settings regression: preserve this exact issue detail.",
+    },
+    {
+      path: "/workspace/github/pr-456.md",
+      kind: "github",
+      url: "https://github.com/openclaw/openclaw/pull/456",
+      content: "Settings regression: preserve this exact PR detail.",
+    },
+  ];
+  const results = searchWorkspace(files, "settings");
+  assert.equal(results.length, 2);
+  for (const result of results) {
+    const expected = files.find((file) => file.url === result.path);
+    assert.ok(expected);
+    assert.equal(readWorkspace(files, result.path), expected, "search result must be readable");
+    assert.equal(readWorkspace(files, expected.path), expected);
+    assert.equal(readWorkspace(files, expected.path.replace("/workspace/", "")), expected);
+  }
+  assert.equal(readWorkspace(files, "https://example.test/issues/123"), undefined);
+  assert.equal(readWorkspace(files, `${files[0]?.url}/extra`), undefined);
+  console.log("workspace identifiers ok: GitHub search results can be read directly");
+}
+
+async function smokeJsonlChunkBoundaries(): Promise<void> {
+  const sourceIndexUrl = "https://example.test/chunks/source-index.jsonl";
+  const filler = `${JSON.stringify({ path: "src/filler.ts", search: "unrelated" })}\n`;
+  const target = JSON.stringify({ path: "src/needle.ts", search: "chunkneedle" });
+  // Many short lines in one chunk must not trigger the incomplete-line cap.
+  const text = filler.repeat(Math.ceil(1_100_000 / filler.length)) + target;
+  const bytes = new TextEncoder().encode(text);
+  for (const chunkSize of [4096, 1_100_000, bytes.byteLength]) {
+    await withMockNetwork(
+      async (url) =>
+        url === sourceIndexUrl
+          ? new Response(trackedBytes(bytes, { bytes: 0 }, chunkSize))
+          : new Response("missing", { status: 404 }),
+      async () => {
+        const files = await buildWorkspace(
+          { OPENAI_API_KEY: "test", SOURCE_INDEX_URL: sourceIndexUrl },
+          "chunkneedle",
+        );
+        assert.ok(
+          files.some((file) => file.path === "src/needle.ts"),
+          `last JSONL record missing with ${chunkSize}-byte chunks`,
+        );
+      },
+    );
+  }
+  console.log("JSONL chunk boundaries ok: large chunks preserve later records and the final line");
 }
 
 function smokeAuthRouting(): void {
