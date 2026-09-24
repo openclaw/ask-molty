@@ -42,7 +42,12 @@ GitHub URLs returned by workspace search and listing can be passed directly to
 `read_workspace`. Retrieval processes JSONL records independently of network chunk
 sizes, within the existing index byte and unfinished-line limits.
 
-Streamed answers compact GitHub citations into readable links. If a source path has
+Completed tool-loop answers are returned directly, without a second model request.
+Empty or incomplete results and the four-round tool limit still use a final streamed
+answer. Tool-loop refusals are returned directly; content-filtered results show an error without
+another model request.
+
+Answers compact GitHub citations into readable links. If a source path has
 malformed percent encoding, its label keeps the raw path and the answer continues.
 
 `run_shell` is deliberately fake and read-only. It supports `rg`, `grep`, `cat`, `head`, `ls`, and `find` over mounted files only. No pipes, redirects, writes, network, or process execution.

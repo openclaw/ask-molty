@@ -38,6 +38,7 @@ export interface WorkspaceFile {
 export interface OpenAIMessage {
   role: "system" | "user" | "assistant" | "tool";
   content?: string | null;
+  refusal?: string | null;
   tool_call_id?: string;
   tool_calls?: Array<{
     id: string;
@@ -51,6 +52,7 @@ export interface OpenAIMessage {
 
 export interface OpenAIChatResponse {
   choices?: Array<{
+    finish_reason?: "stop" | "length" | "tool_calls" | "content_filter" | "function_call";
     message?: OpenAIMessage;
   }>;
 }

@@ -66,8 +66,7 @@ export default {
 
     try {
       const workspace = await buildWorkspace(env, message);
-      const messages = await messagesWithTools(env, message, workspace);
-      const answer = await streamAnswer(env, messages);
+      const answer = await answerWithTools(env, message, workspace);
       const headers = corsHeaders(request);
       headers.set("Content-Type", "text/plain; charset=utf-8");
       headers.set("Cache-Control", "no-store");
@@ -122,11 +121,11 @@ async function serveArtifact(request: Request, url: string): Promise<Response> {
   return request.method === "HEAD" ? new Response(null, response) : response;
 }
 
-async function messagesWithTools(
+async function answerWithTools(
   env: Env,
   question: string,
   workspace: WorkspaceFile[],
-): Promise<OpenAIMessage[]> {
+): Promise<string | ReadableStream<Uint8Array>> {
   const messages: OpenAIMessage[] = [
     { role: "system", content: systemPrompt },
     {
@@ -142,10 +141,20 @@ Use workspace tools if you need to search or read exact files before answering.`
 
   for (let round = 0; round < maxToolRounds; round += 1) {
     const response = await openAI(env, messages, true);
-    const assistant = response.choices?.[0]?.message;
-    if (!assistant) return messages;
+    const choice = response.choices?.[0];
+    const assistant = choice?.message;
+    // A refusal is terminal even if no ordinary answer was returned.
+    if (assistant?.refusal?.trim()) return compactGithubLinks(assistant.refusal);
+    if (choice?.finish_reason === "content_filter")
+      throw new Error("OpenAI response was blocked by content filtering");
+    if (!assistant) break;
     const calls = assistant.tool_calls ?? [];
-    if (!calls.length) return messages;
+    if (!calls.length) {
+      // The tool-enabled completion already answered; do not generate it again.
+      if (choice?.finish_reason === "stop" && assistant.content?.trim())
+        return compactGithubLinks(assistant.content);
+      break;
+    }
     messages.push(assistant);
     for (const call of calls) {
       messages.push({
@@ -156,7 +165,7 @@ Use workspace tools if you need to search or read exact files before answering.`
     }
   }
 
-  return messages;
+  return streamAnswer(env, messages);
 }
 
 function runTool(workspace: WorkspaceFile[], name: string, rawArgs: string): unknown {

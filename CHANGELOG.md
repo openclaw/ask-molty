@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reuse completed tool-loop answers instead of generating them twice, while keeping streamed fallback answers and making refusals visible without another model request.
+
 - Recover from non-object model tool arguments and time out stalled OpenClaw ID token bodies instead of leaving sign-in pending.
 - Read GitHub search results by their displayed URLs and preserve later JSONL records when indexes arrive in large network chunks.
 

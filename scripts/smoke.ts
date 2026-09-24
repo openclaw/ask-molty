@@ -16,7 +16,7 @@ import {
   retrievalTimeouts,
   searchWorkspace,
 } from "../src/retrieval";
-import type { Env, WorkspaceFile } from "../src/types";
+import type { Env, OpenAIChatResponse, OpenAIMessage, WorkspaceFile } from "../src/types";
 import worker, {
   artifactTimeouts,
   artifactUrls,
@@ -36,6 +36,7 @@ const required = [
 ];
 
 smokeAuthRouting();
+await smokeChatAnswers();
 await smokeInvalidToolArguments();
 await smokeOidcTokenBodyTimeout();
 smokeWorkspaceIdentifiers();
@@ -76,8 +77,7 @@ if (process.env.ASK_MOLTY_SKIP_EXPORT_SMOKE === "1") {
   console.log(`ask-molty smoke ok: ${fileCount} workspace files`);
 }
 
-async function smokeInvalidToolArguments(): Promise<void> {
-  const secret = "synthetic-tool-secret";
+function chatRequest(secret: string): Request {
   const payload = base64UrlEncode(
     JSON.stringify({
       provider: "openclaw-id",
@@ -86,6 +86,218 @@ async function smokeInvalidToolArguments(): Promise<void> {
     }),
   );
   const cookie = `${payload}.${createHmac("sha256", secret).update(payload).digest("base64url")}`;
+  return new Request("https://docs.openclaw.ai/ask-molty/api/chat", {
+    method: "POST",
+    headers: { Origin: "https://docs.openclaw.ai", Cookie: `ask_molty_session=${cookie}` },
+    body: JSON.stringify({ message: "fixture" }),
+  });
+}
+
+async function smokeChatAnswers(): Promise<void> {
+  const secret = "synthetic-chat-secret";
+  const content = "See https://github.com/openclaw/openclaw/issues/42.";
+  const answer = "See [Issue #42](https://github.com/openclaw/openclaw/issues/42).";
+  const refusal = "I cannot help with that request.";
+  const filtered = "OpenAI response was blocked by content filtering";
+  const completed: OpenAIChatResponse = {
+    choices: [{ finish_reason: "stop", message: { role: "assistant", content } }],
+  };
+  const toolRounds: OpenAIChatResponse[] = Array.from({ length: 4 }, (_, index) => ({
+    choices: [
+      {
+        finish_reason: "tool_calls",
+        message: {
+          role: "assistant",
+          content: "Checking the workspace.",
+          tool_calls: [
+            {
+              id: `list-${index}`,
+              type: "function",
+              function: { name: "list_workspace", arguments: "{}" },
+            },
+          ],
+        },
+      },
+    ],
+  }));
+  const cases: Array<{
+    name: string;
+    completions: OpenAIChatResponse[];
+    expected: string;
+    fallback?: boolean;
+    errorStatus?: number;
+    upstreamStatus?: number;
+  }> = [
+    { name: "no tools", completions: [completed], expected: answer },
+    { name: "after a tool", completions: [toolRounds[0]!, completed], expected: answer },
+    ...(["stop", "content_filter"] as const).map((finish_reason) => ({
+      name: `refusal with ${finish_reason}`,
+      completions: [
+        {
+          choices: [
+            { finish_reason, message: { role: "assistant" as const, content: null, refusal } },
+          ],
+        },
+      ],
+      expected: refusal,
+    })),
+    {
+      name: "filtered without a message",
+      completions: [{ choices: [{ finish_reason: "content_filter" }] }],
+      expected: filtered,
+      errorStatus: 502,
+    },
+    {
+      name: "filtered partial content",
+      completions: [
+        { choices: [{ finish_reason: "content_filter", message: { role: "assistant", content } }] },
+      ],
+      expected: filtered,
+      errorStatus: 502,
+    },
+    ...[null, "", "  \n"].map((empty) => ({
+      name: `empty content ${JSON.stringify(empty)}`,
+      completions: [
+        {
+          choices: [
+            {
+              finish_reason: "stop" as const,
+              message: { role: "assistant" as const, content: empty },
+            },
+          ],
+        },
+      ],
+      expected: answer,
+      fallback: true,
+    })),
+    { name: "missing choice", completions: [{}], expected: answer, fallback: true },
+    { name: "missing message", completions: [{ choices: [{}] }], expected: answer, fallback: true },
+    {
+      name: "truncated answer",
+      completions: [
+        {
+          choices: [
+            { finish_reason: "length", message: { role: "assistant", content: "unfinished" } },
+          ],
+        },
+      ],
+      expected: answer,
+      fallback: true,
+    },
+    {
+      name: "unconfirmed completion",
+      completions: [{ choices: [{ message: { role: "assistant", content } }] }],
+      expected: answer,
+      fallback: true,
+    },
+    { name: "tool limit", completions: toolRounds, expected: answer, fallback: true },
+    {
+      name: "upstream failure",
+      completions: [{}],
+      upstreamStatus: 429,
+      expected: "OpenAI error 429",
+      errorStatus: 502,
+    },
+  ];
+
+  for (const test of cases) {
+    const requests: Array<{
+      model: string;
+      messages: OpenAIMessage[];
+      tools?: unknown[];
+      tool_choice?: string;
+      stream?: boolean;
+    }> = [];
+    await withMockNetwork(
+      async (url, init) => {
+        if (url === "https://docs.openclaw.ai/docs-search.json")
+          return Response.json({ entries: [{ url: "/fixture", search: "fixture ".repeat(150) }] });
+        if (url !== "https://api.openai.com/v1/chat/completions") return new Response("");
+        const body = JSON.parse(String(init?.body));
+        requests.push(body);
+        if (test.upstreamStatus)
+          return new Response("private upstream detail", { status: test.upstreamStatus });
+        if (body.stream) {
+          assert.equal(test.fallback, true, `${test.name}: unexpected second generation`);
+          return new Response(
+            'data: {"choices":[{"delta":{"content":"See https://github.com/openclaw/"}}]}\n\n' +
+              'data: {"choices":[{"delta":{"content":"openclaw/issues/42."}}]}\n\ndata: [DONE]\n\n',
+            { headers: { "Content-Type": "text/event-stream" } },
+          );
+        }
+        const completion = test.completions[requests.length - 1];
+        assert.ok(completion, `${test.name}: unexpected extra tool round`);
+        return Response.json(completion);
+      },
+      async () => {
+        const response = await worker.fetch(chatRequest(secret), {
+          OPENAI_API_KEY: "test",
+          ASK_MOLTY_AUTH_SECRET: secret,
+        });
+        assert.equal(response.status, test.errorStatus ?? 200, test.name);
+        assert.equal(
+          response.headers.get("Access-Control-Allow-Origin"),
+          "https://docs.openclaw.ai",
+        );
+        if (test.errorStatus) {
+          assert.deepEqual(await response.json(), { error: test.expected }, test.name);
+        } else {
+          assert.equal(response.headers.get("Content-Type"), "text/plain; charset=utf-8");
+          assert.equal(response.headers.get("Cache-Control"), "no-store");
+          assert.equal(response.headers.get("X-Content-Type-Options"), "nosniff");
+          assert.equal(response.headers.get("X-Strategy"), "workspace-tools-rag");
+          assert.equal(response.headers.get("X-Workspace-File-Count"), "1");
+          assert.ok(response.body, `${test.name}: client-readable response body`);
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let text = "";
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            text += decoder.decode(value, { stream: true });
+          }
+          text += decoder.decode();
+          assert.equal(text, test.expected, test.name);
+        }
+        assert.equal(
+          requests.length,
+          test.completions.length + Number(Boolean(test.fallback)),
+          test.name,
+        );
+        const toolCount = test.completions.filter(
+          (reply) => reply.choices?.[0]?.message?.tool_calls?.length,
+        ).length;
+        for (const [index, request] of requests.entries()) {
+          assert.equal(request.model, "chat-latest", test.name);
+          assert.equal(
+            request.stream,
+            index === test.completions.length ? true : undefined,
+            test.name,
+          );
+          assert.equal(request.tools?.length, request.stream ? undefined : 4, test.name);
+          assert.equal(request.tool_choice, request.stream ? undefined : "auto", test.name);
+          assert.equal(request.messages.length, 2 + 2 * Math.min(index, toolCount), test.name);
+          assert.equal(request.messages[0]?.role, "system");
+          assert.match(request.messages[1]?.content ?? "", /Question: fixture/);
+          for (let round = 0; round < Math.min(index, toolCount); round += 1) {
+            assert.deepEqual(
+              request.messages[2 + 2 * round],
+              toolRounds[round]?.choices?.[0]?.message,
+            );
+            const result = request.messages[3 + 2 * round];
+            assert.equal(result?.role, "tool");
+            assert.equal(result?.tool_call_id, `list-${round}`);
+            assert.equal(JSON.parse(result?.content ?? "").files.length, 1);
+          }
+        }
+      },
+    );
+  }
+  console.log("chat answers ok: reuse, tools, refusals, fallback, tool limit, and upstream errors");
+}
+
+async function smokeInvalidToolArguments(): Promise<void> {
+  const secret = "synthetic-tool-secret";
   const invalidArguments = ["null", "[]", '"text"', "42", "true", "{broken"];
   const names = ["search_workspace", "read_workspace", "list_workspace", "run_shell"];
   let rounds = 0;
@@ -95,8 +307,7 @@ async function smokeInvalidToolArguments(): Promise<void> {
         return Response.json({ entries: [{ url: "/fixture", search: "fixture ".repeat(150) }] });
       if (url !== "https://api.openai.com/v1/chat/completions") return new Response("");
       const body = JSON.parse(String(init?.body));
-      if (body.stream)
-        return new Response('data: {"choices":[{"delta":{"content":"Recovered"}}]}\n\n');
+      assert.equal(body.stream, undefined);
       rounds += 1;
       if (rounds === 1) {
         return Response.json({
@@ -120,17 +331,15 @@ async function smokeInvalidToolArguments(): Promise<void> {
       const results = body.messages.filter((message: { role: string }) => message.role === "tool");
       assert.equal(results.length, names.length * invalidArguments.length);
       for (const result of results) assert.match(JSON.parse(result.content).error, /arguments/);
-      return Response.json({ choices: [{ message: { role: "assistant", content: "done" } }] });
+      return Response.json({
+        choices: [{ finish_reason: "stop", message: { role: "assistant", content: "Recovered" } }],
+      });
     },
     async () => {
-      const response = await worker.fetch(
-        new Request("https://docs.openclaw.ai/ask-molty/api/chat", {
-          method: "POST",
-          headers: { Origin: "https://docs.openclaw.ai", Cookie: `ask_molty_session=${cookie}` },
-          body: JSON.stringify({ message: "fixture" }),
-        }),
-        { OPENAI_API_KEY: "test", ASK_MOLTY_AUTH_SECRET: secret },
-      );
+      const response = await worker.fetch(chatRequest(secret), {
+        OPENAI_API_KEY: "test",
+        ASK_MOLTY_AUTH_SECRET: secret,
+      });
       assert.equal(response.status, 200, await response.clone().text());
       assert.equal(await response.text(), "Recovered");
       assert.equal(rounds, 2);
