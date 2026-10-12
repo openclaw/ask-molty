@@ -1,42 +1,59 @@
 # Releasing Ask Molty
 
-Ask Molty is a private npm project deployed as a Cloudflare Worker. Numbered
-releases publish a signed Git tag and GitHub Release; they do not publish an npm
-package or attach a copy of the generated workspace.
+Numbered releases publish the versioned source on GitHub. The package is private;
+there is no npm publication, Homebrew handoff, or application-signing credential.
+Deployment is separate from release publication.
 
-The existing `workspace-latest` release serves the GitHub search index used by
-the Worker. Keep that tag, release, asset, and its runtime URLs unchanged when
-publishing a numbered release. Worker deployment remains a separate operation.
+## Prepare
 
-1. Start from clean, current `main`. Update `package.json` and the root package
-   versions in `package-lock.json`.
-2. Finalize `CHANGELOG.md` under `## <version> - YYYY-MM-DD`, preserving entries,
-   contributor credits, and the Highlights line.
-3. Run `npm ci`, `npm run build`, and `npm run check`. The export and smoke checks
-   require a docs mirror, OpenClaw source checkout, and Gitcrawl database; override
-   the paths as described in README, or use the fixture schema from
-   `.github/workflows/ci.yml`.
-4. Review the release changes, merge the release PR with squash, and wait for CI
-   to pass on the exact merged commit.
-5. Confirm that neither the local/remote tag nor a GitHub Release already exists
-   for `v<version>`. Create and verify a signed tag on that commit, then push it:
+1. Update `package.json` and any lockfile root version for the next release.
+2. Finalize one `## X.Y.Z - YYYY-MM-DD` section in `CHANGELOG.md`, preserving
+   contributor credit and release highlights. Keep an empty `## Unreleased` above it.
+3. Land the reviewed release preparation PR on protected `main`. Wait for every
+   independent push CI check on that exact merged commit to pass.
 
-   ```bash
-   git tag -s "v<version>" <release-commit> -m "Ask Molty <version>"
-   git verify-tag "v<version>"
-   git push origin "refs/tags/v<version>"
-   ```
+## No-publish proof
 
-6. Write the finalized changelog section, beginning with Highlights and omitting
-   the version heading, to a notes file. Publish it with:
+Run the **Release** workflow on current `main`, with the version from `package.json`
+and `dry_run=true` (the dispatch default):
 
-   ```bash
-   gh release create "v<version>" --verify-tag --title "Ask Molty <version>" --notes-file <notes-file>
-   ```
+```sh
+gh workflow run release.yml --repo openclaw/ask-molty --ref main -f version=X.Y.Z -F dry_run=true
+```
 
-7. Read back the GitHub Release and verify the tag resolves to the tested commit.
-   Check any triggered workflows and verify that
-   `https://docs.openclaw.ai/ask-molty/api/session` still answers. An unauthenticated
-   request returns HTTP 401 with `{"authenticated":false,"provider":null}`.
-8. Add an empty `## Unreleased` above the released section and land it through a
-   reviewed PR. Leave the checkout clean on `main` at `origin/main`.
+A rehearsal freezes current protected `main`, even if that version already has a
+historical tag or release. It validates the version and dated changelog, requires
+exact-commit push CI, runs `scripts/verify-release.sh` with Node.js 24.15.0, assembles
+source archives, and independently verifies their inventory and SHA-256 checksums.
+It creates no tag, draft, release, or deployment. No secrets are needed.
+
+The local verification script only installs dependencies, builds, and tests. Run
+it with Node.js 24.15+ and the repository's package manager. It does not publish.
+
+## Publish an explicitly authorized release
+
+After the rehearsal succeeds, create an SSH-signed annotated `vX.Y.Z` tag on the
+verified commit using a key listed in `.github/release-allowed-signers`. Verify it
+locally and push the tag. The tag push is the publication entrypoint; do not run
+`gh release create` or a local publish helper.
+
+`.github/workflows/release.yml` calls
+`openclaw/release-workflows/.github/workflows/release-source.yml@v1`. It verifies
+the signed tag, protected-branch ancestry, exact version metadata, dated notes,
+and green push CI, then builds and verifies the frozen source before publishing.
+Live dispatches also require a pre-existing signed tag; an unsigned workflow-created
+tag cannot satisfy this repository's policy. Never move tags or republish a version.
+
+The GitHub Release contains the exact changelog section, commit-based `.tar.gz`
+and `.zip` source archives, `ASSET-INVENTORY.json`, and `SHA256SUMS`. The two source
+verifiers run without publication credentials. The publisher checks the frozen
+inventory and tag again before publishing. Read back the release and verify the
+checksums and tag commit after completion. Leave `main` current and clean.
+
+## Worker and workspace boundary
+
+Worker deployment and workspace export/publication remain separate. The special
+`workspace-latest` release and its `github-search.jsonl` runtime URL are untouched.
+Only `v*` tags trigger numbered publication. Release proof runs the synthetic
+runtime smoke and a local Wrangler bundle; exact-commit push CI additionally
+verifies the full docs/source/Gitcrawl export and workspace smoke.
