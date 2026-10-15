@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Retain Worker warning and error logs for diagnosing chat failures, with request query strings redacted and routine invocation logging disabled.
+
 - Reuse completed tool-loop answers instead of generating them twice, while keeping streamed fallback answers and making refusals visible without another model request.
 
 - Recover from non-object model tool arguments and time out stalled OpenClaw ID token bodies instead of leaving sign-in pending.

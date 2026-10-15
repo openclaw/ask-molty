@@ -10,6 +10,18 @@ routes = [
   { pattern = "docs.openclaw.ai/ask-molty/*", zone_name = "openclaw.ai" },
 ]
 
+[observability]
+redact_query_string = true
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+# Keep failure logs without storing an invocation record for every request.
+invocation_logs = false
+
+[observability.traces]
+enabled = false
+
 [vars]
 DOCS_INDEX_URL = "https://docs.openclaw.ai/docs-search.json"
 DOCS_CORPUS_URL = "https://docs.openclaw.ai/llms-full.txt"
