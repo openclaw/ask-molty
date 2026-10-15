@@ -86,7 +86,9 @@ headers arrive; it does not limit the artifact body's download time.
 
 ## Deploy
 
-The Worker expects `OPENAI_API_KEY` as a Cloudflare Worker secret. The default model is `chat-latest`, which OpenAI maps to GPT-5.5 Instant in the API.
+The Worker expects `OPENAI_API_KEY` as a Cloudflare Worker secret. The default model is
+[`chat-latest`](https://developers.openai.com/api/docs/models/chat-latest), a moving alias
+for the latest Instant model used in ChatGPT.
 
 Docs chat signs in through OpenClaw ID:
 
@@ -105,3 +107,9 @@ timeout without creating a session.
 ```bash
 npm run deploy
 ```
+
+Worker logs retain custom warnings, errors, and uncaught exceptions at full sampling.
+Per-request invocation logs and tracing are disabled to limit routine traffic volume;
+request URL query strings are redacted. Existing chat failures log the public error
+message; this change adds no prompt, answer, or credential logging. It takes effect after Worker deployment;
+it cannot recover errors from periods when logging was disabled.
