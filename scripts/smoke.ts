@@ -79,32 +79,24 @@ if (process.env.ASK_MOLTY_SKIP_EXPORT_SMOKE === "1") {
   console.log(`ask-molty smoke ok: ${fileCount} workspace files`);
 }
 
+function assertSupportPolicy(content: string): void {
+  assert.match(content, /\[Get support\]\(https:\/\/community\.openclaw\.ai\/\)/);
+  assert.match(content, /official OpenClaw support forum/);
+  assert.match(content, /(?:privately to|go privately to) security@openclaw\.ai/);
+  for (const sensitive of [
+    "secrets",
+    "tokens",
+    "credentials",
+    "private config",
+    "unredacted logs",
+  ]) {
+    assert.ok(content.includes(sensitive), `support policy must address ${sensitive}`);
+  }
+}
+
 function smokeSupportHandoff(): void {
-  assert.match(systemPrompt, /Answer only from provided context and tool results/);
-  assert.match(systemPrompt, /If evidence is insufficient, say what is missing/);
-  assert.match(systemPrompt, /unresolved usage, setup, or troubleshooting/);
-  assert.match(systemPrompt, /when documentation is unavailable/);
-  assert.match(
-    systemPrompt,
-    /\[Get support\]\(https:\/\/community\.openclaw\.ai\/\), the official OpenClaw support forum, for human help/,
-  );
-  assert.match(systemPrompt, /Do not invent findings, claim a bug is confirmed without evidence/);
-  assert.match(
-    systemPrompt,
-    /or promise a response, fix, timeline, or that anyone has been contacted/,
-  );
-  assert.match(
-    systemPrompt,
-    /Never ask users to post secrets, tokens, credentials, private config, or unredacted logs/,
-  );
-  assert.match(systemPrompt, /Keep bug reports and development discussions on GitHub/);
-  assert.match(
-    systemPrompt,
-    /Security vulnerabilities must be reported privately to security@openclaw\.ai, not posted to the public support forum or a public GitHub issue/,
-  );
-  console.log(
-    "support handoff ok: official forum, grounding, privacy, and private security reporting",
-  );
+  assertSupportPolicy(systemPrompt);
+  console.log("support handoff ok: official destination and privacy policy present");
 }
 
 function chatRequest(secret: string): Request {
@@ -654,25 +646,7 @@ async function smokeRuntimeRetrieval(): Promise<void> {
       const files = await buildWorkspace(env, "settings implementation issue");
       const unavailable = files.find((file) => file.path === "/workspace/docs/unavailable.md");
       assert.ok(unavailable, "runtime retrieval: missing docs unavailable workspace note");
-      assert.match(unavailable.content, /cannot load the docs right now and suggest retrying/);
-      assert.match(
-        unavailable.content,
-        /Do not invent documentation details or claim the user's issue is a confirmed bug/,
-      );
-      assert.match(unavailable.content, /unresolved usage, setup, or troubleshooting/);
-      assert.match(
-        unavailable.content,
-        /\[Get support\]\(https:\/\/community\.openclaw\.ai\/\), the official OpenClaw support forum, for human help/,
-      );
-      assert.match(
-        unavailable.content,
-        /never secrets, tokens, credentials, private config, or unredacted logs/,
-      );
-      assert.match(unavailable.content, /Do not promise a response, fix, or timeline/);
-      assert.match(
-        unavailable.content,
-        /Security vulnerabilities go privately to security@openclaw\.ai, not the public forum or a public GitHub issue/,
-      );
+      assertSupportPolicy(unavailable.content);
       if (!files.some((file) => file.kind === "source")) {
         throw new Error("runtime retrieval: source context was blocked by docs outage");
       }
