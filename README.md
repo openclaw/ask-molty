@@ -38,6 +38,14 @@ The Worker does deterministic candidate retrieval, mounts the best docs/source/G
 
 Docs are canonical. Source is implementation truth. GitHub issues/PRs are discussion and status evidence.
 
+For unresolved usage, setup, or troubleshooting, Ask Molty offers human help through
+[Get support](https://community.openclaw.ai/), the official OpenClaw support forum.
+When documentation cannot be loaded, it explains that limitation, suggests retrying,
+and offers the same support route without inventing findings or promising a response or fix.
+Share only relevant redacted errors, never secrets, credentials, private config, or unredacted logs.
+Bug reports and development discussions keep their existing GitHub/developer routes;
+security vulnerabilities must be reported privately to security@openclaw.ai, not posted publicly.
+
 GitHub URLs returned by workspace search and listing can be passed directly to
 `read_workspace`. Retrieval processes JSONL records independently of network chunk
 sizes, within the existing index byte and unfinished-line limits.
