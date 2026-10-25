@@ -36,6 +36,6 @@ jobs:
       ci-check-events: '["push"]'
       source-archives: true
       test-command: >-
-        npx --yes --package=node@24.15.0
+        npx --yes --package=node@24.22.1
         --call 'bash scripts/verify-release.sh'
       release-name: Ask Molty
