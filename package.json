@@ -26,6 +26,7 @@
     "wrangler": "^4.129.1"
   },
   "overrides": {
-    "esbuild": "0.28.2"
+    "esbuild": "0.28.2",
+    "workerd": "1.20261021.1"
   }
 }
