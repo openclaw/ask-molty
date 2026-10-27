@@ -1080,6 +1080,26 @@ async function smokeOidcTokenFetchTimeout(): Promise<void> {
     `https://docs.openclaw.ai/ask-molty/auth/oidc-callback?code=test-code&state=${state}`,
   );
 
+  await withMockNetwork(
+    async (url) => {
+      if (url !== tokenUrl) return new Response("missing", { status: 404 });
+      throw new TypeError("TLS failure with synthetic-private-diagnostic");
+    },
+    async () => {
+      const response = await worker.fetch(request, env);
+      assert.equal(response.status, 502);
+      assert.match(response.headers.get("content-type") ?? "", /text\/html/);
+      assert.equal(response.headers.get("set-cookie"), null);
+      const body = await response.text();
+      assert.match(body, /Ask Molty verification failed/);
+      assert.match(body, /try again/);
+      assert.match(body, /docs operator/);
+      assert.match(body, /certificate chain/);
+      assert.doesNotMatch(body, /synthetic-private-diagnostic/);
+    },
+  );
+  console.log("oidc token transport failure ok: actionable page without creating a session");
+
   const signals: Array<AbortSignal | undefined> = [];
   await withMockNetwork(
     async (url, init) => {

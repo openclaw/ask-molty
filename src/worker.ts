@@ -854,7 +854,10 @@ async function oidcCallback(request: Request, env: Env): Promise<Response> {
     ) {
       return authErrorPage("OpenClaw ID verification timed out. Please try again.", 504);
     }
-    throw error;
+    return authErrorPage(
+      "OpenClaw ID could not be reached securely. Please try again. If this continues, ask the docs operator to check the issuer configuration, availability, and certificate chain.",
+      502,
+    );
   } finally {
     clearTimeout(requestTimer);
   }
