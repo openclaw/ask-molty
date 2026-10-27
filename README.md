@@ -102,7 +102,10 @@ Docs chat signs in through OpenClaw ID:
 
 OpenClaw ID token exchanges have a 60-second deadline covering both response
 headers and the token body. A stalled exchange shows a retryable verification
-timeout without creating a session.
+timeout without creating a session. Other token-exchange connection failures show a
+retryable verification error with guidance to have the docs operator check the
+issuer configuration, availability, and certificate chain. These failures do not
+create a session or bypass TLS verification.
 
 ```bash
 npm run deploy
