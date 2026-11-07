@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { createHmac } from "node:crypto";
 import { normalizeDocsReturnTo } from "../src/auth";
+import { systemPrompt } from "../src/prompt";
 import {
   buildWorkspace,
   maxJsonlStreamBytes,
@@ -35,6 +36,7 @@ const required = [
   "workspace-manifest.json",
 ];
 
+smokeSupportHandoff();
 smokeAuthRouting();
 await smokeChatAnswers();
 await smokeInvalidToolArguments();
@@ -75,6 +77,26 @@ if (process.env.ASK_MOLTY_SKIP_EXPORT_SMOKE === "1") {
     throw new Error("github index missing OpenClaw links");
 
   console.log(`ask-molty smoke ok: ${fileCount} workspace files`);
+}
+
+function assertSupportPolicy(content: string): void {
+  assert.match(content, /\[Get support\]\(https:\/\/community\.openclaw\.ai\/\)/);
+  assert.match(content, /official OpenClaw support forum/);
+  assert.match(content, /(?:privately to|go privately to) security@openclaw\.ai/);
+  for (const sensitive of [
+    "secrets",
+    "tokens",
+    "credentials",
+    "private config",
+    "unredacted logs",
+  ]) {
+    assert.ok(content.includes(sensitive), `support policy must address ${sensitive}`);
+  }
+}
+
+function smokeSupportHandoff(): void {
+  assertSupportPolicy(systemPrompt);
+  console.log("support handoff ok: official destination and privacy policy present");
 }
 
 function chatRequest(secret: string): Request {
@@ -278,6 +300,11 @@ async function smokeChatAnswers(): Promise<void> {
           assert.equal(request.tool_choice, request.stream ? undefined : "auto", test.name);
           assert.equal(request.messages.length, 2 + 2 * Math.min(index, toolCount), test.name);
           assert.equal(request.messages[0]?.role, "system");
+          assert.equal(
+            request.messages[0]?.content,
+            systemPrompt,
+            `${test.name}: support policy in every tool round and streamed fallback`,
+          );
           assert.match(request.messages[1]?.content ?? "", /Question: fixture/);
           for (let round = 0; round < Math.min(index, toolCount); round += 1) {
             assert.deepEqual(
@@ -617,9 +644,9 @@ async function smokeRuntimeRetrieval(): Promise<void> {
     },
     async () => {
       const files = await buildWorkspace(env, "settings implementation issue");
-      if (!files.some((file) => file.path === "/workspace/docs/unavailable.md")) {
-        throw new Error("runtime retrieval: missing docs unavailable workspace note");
-      }
+      const unavailable = files.find((file) => file.path === "/workspace/docs/unavailable.md");
+      assert.ok(unavailable, "runtime retrieval: missing docs unavailable workspace note");
+      assertSupportPolicy(unavailable.content);
       if (!files.some((file) => file.kind === "source")) {
         throw new Error("runtime retrieval: source context was blocked by docs outage");
       }

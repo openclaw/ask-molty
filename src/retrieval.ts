@@ -433,7 +433,7 @@ function docsUnavailableFile(): WorkspaceFile {
     path: "/workspace/docs/unavailable.md",
     kind: "docs",
     content:
-      "# Docs unavailable\n\nThe OpenClaw docs index could not be loaded for this answer. If the question needs documentation context, tell the user Molty cannot load the docs right now and ask them to retry in a moment. Do not invent documentation details.",
+      "# Docs unavailable\n\nThe OpenClaw docs index could not be loaded for this answer. If the question needs documentation context, tell the user Molty cannot load the docs right now and suggest retrying. Do not invent documentation details or claim the user's issue is a confirmed bug. For unresolved usage, setup, or troubleshooting, offer [Get support](https://community.openclaw.ai/), the official OpenClaw support forum, for human help. Share only relevant redacted errors, never secrets, tokens, credentials, private config, or unredacted logs. Do not promise a response, fix, or timeline. Security vulnerabilities go privately to security@openclaw.ai, not the public forum or a public GitHub issue.",
   };
 }
 
