@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Pin the shared source-release workflow to a reviewed commit with complete release listing and exact-byte draft retry checks.
+
 - Preserve the native GitHub Actions job budget for CodeQL scans.
 
 - Batch main CodeQL analysis weekly while preserving PR and manual scans.
